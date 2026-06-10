@@ -6,10 +6,15 @@ Permite hacer preguntas en lenguaje natural sobre el rendimiento web de swipeup.
 
 ## Ejemplos de uso
 
+**swipeup.biz (configuración por defecto):**
 - *"¿Cómo ha ido el tráfico orgánico este mes?"*
 - *"¿Qué páginas han recibido más clics desde Google?"*
 - *"¿Qué queries tienen muchas impresiones y bajo CTR?"*
-- *"¿Ha habido alguna caída respecto al mes pasado?"*
+
+**Otros clientes (pasando el parámetro `site` o `property_id`):**
+- *"¿Qué propiedades de Search Console tenemos disponibles?"*
+- *"¿Cómo va el SEO de ricopesca.com este mes?"*
+- *"Compara el tráfico de los dos últimos meses en sc-domain:otrodominio.com"*
 
 ---
 
@@ -137,11 +142,26 @@ Ambas en modo **solo lectura**. El proyecto no escribe ni modifica datos en Goog
 
 ---
 
+## Soporte multi-cliente
+
+El servidor es compatible con todas las propiedades de Google Analytics y Search Console a las que tenga acceso la cuenta autenticada.
+
+**Descubrir propiedades disponibles:**
+Pregunta a Claude: *"¿Qué propiedades de Search Console tenemos disponibles?"* — usará la herramienta `gsc_list_properties` y te devolverá la lista completa con las URLs exactas.
+
+**Consultar otro dominio:**
+Todas las herramientas aceptan parámetros opcionales:
+- `site` — URL exacta de propiedad GSC (ej: `sc-domain:ricopesca.com`)
+- `property_id` — ID numérico de propiedad GA4 (ej: `123456789`)
+
+Si se omiten, se usan los valores del `.env` (swipeup.biz por defecto).
+
+---
+
 ## Fases del proyecto
 
-- **Fase 1 (actual):** servidor MCP local, pruebas con Claude Desktop, datos de swipeup.biz
-- **Fase 2:** herramientas de análisis cruzado GA4 + Search Console
-- **Fase 3 (futura):** despliegue en Google Cloud Run, service accounts, multi-cliente
+- **Fase 1 (completada):** servidor MCP local, pruebas con Claude Desktop, datos de swipeup.biz, soporte multi-cliente GSC/GA4
+- **Fase 2 (futura):** despliegue en Google Cloud Run, service accounts, acceso compartido sin token.json manual
 
 ---
 

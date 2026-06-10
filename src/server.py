@@ -4,6 +4,13 @@ server.py — Servidor MCP principal de SwipeUp
 Expone herramientas para consultar GA4 y Google Search Console
 desde Claude Desktop u otro cliente compatible con MCP.
 
+Todas las herramientas admiten parámetros opcionales para consultar
+cualquier propiedad a la que tenga acceso la cuenta autenticada:
+  - site        → URL de propiedad en GSC (ej: sc-domain:ricopesca.com)
+  - property_id → ID numérico de propiedad GA4 (ej: 123456789)
+
+Si se omiten, se usan los valores del archivo .env (swipeup.biz por defecto).
+
 Uso:
     python src/server.py
 
@@ -36,8 +43,8 @@ ROOT_DIR = Path(__file__).parent.parent
 load_dotenv(ROOT_DIR / ".env")
 TOKEN_FILE = ROOT_DIR / os.getenv("GOOGLE_TOKEN_FILE", "token.json")
 CREDENTIALS_FILE = ROOT_DIR / os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
-GA4_PROPERTY_ID = os.getenv("GA4_PROPERTY_ID")
-GSC_SITE_URL = os.getenv("GSC_SITE_URL")
+DEFAULT_GA4_PROPERTY_ID = os.getenv("GA4_PROPERTY_ID")
+DEFAULT_GSC_SITE_URL = os.getenv("GSC_SITE_URL")
 
 SCOPES = [
     "https://www.googleapis.com/auth/analytics.readonly",
@@ -77,6 +84,57 @@ def get_gsc_service():
     return build("searchconsole", "v1", credentials=get_credentials())
 
 
+# ── Helpers de resolución de cliente ──────────────────────────────────────────
+
+def resolve_gsc_site(site: str) -> str:
+    """
+    Devuelve la URL de propiedad GSC a usar.
+    Si se pasa un valor explícito, lo usa; si no, usa el valor del .env.
+    """
+    s = site.strip() if site else ""
+    if s:
+        return s
+    if DEFAULT_GSC_SITE_URL:
+        return DEFAULT_GSC_SITE_URL
+    raise ValueError(
+        "No se ha especificado ninguna propiedad GSC. "
+        "Pasa el parámetro 'site' o configura GSC_SITE_URL en el .env"
+    )
+
+
+def resolve_ga4_property(property_id: str) -> str:
+    """
+    Devuelve el ID de propiedad GA4 a usar.
+    Si se pasa un valor explícito, lo usa; si no, usa el valor del .env.
+    """
+    p = property_id.strip() if property_id else ""
+    if p:
+        return p
+    if DEFAULT_GA4_PROPERTY_ID:
+        return DEFAULT_GA4_PROPERTY_ID
+    raise ValueError(
+        "No se ha especificado ningún ID de propiedad GA4. "
+        "Pasa el parámetro 'property_id' o configura GA4_PROPERTY_ID en el .env"
+    )
+
+
+def get_domain_from_gsc_url(site_url: str) -> str:
+    """
+    Extrae el dominio de una URL de propiedad GSC para normalizar rutas.
+
+    Ejemplos:
+      sc-domain:swipeup.biz     → swipeup.biz
+      https://ricopesca.com/    → ricopesca.com
+      http://example.com        → example.com
+    """
+    url = site_url.strip()
+    if url.startswith("sc-domain:"):
+        return url[len("sc-domain:"):]
+    # Quitamos protocolo y trailing slash
+    url = url.replace("https://", "").replace("http://", "").rstrip("/")
+    return url
+
+
 # ── Helpers de fechas ──────────────────────────────────────────────────────────
 
 def date_range_str(days: int) -> tuple[str, str]:
@@ -105,26 +163,68 @@ def fmt_num(value: float) -> str:
     return f"{int(value):,}"
 
 
+# ── Herramienta de descubrimiento de propiedades ───────────────────────────────
+
+@mcp.tool()
+def gsc_list_properties() -> str:
+    """
+    Lista todas las propiedades de Google Search Console a las que tiene acceso
+    la cuenta autenticada. Úsala para saber qué dominios puedes consultar y
+    obtener las URLs exactas que necesitas pasar al parámetro 'site' en las
+    demás herramientas.
+
+    Ejemplo de uso posterior:
+        gsc_seo_summary(site="sc-domain:ricopesca.com")
+    """
+    try:
+        service = get_gsc_service()
+        sites_response = service.sites().list().execute()
+        sites = sites_response.get("siteEntry", [])
+
+        if not sites:
+            return "No se encontraron propiedades en la cuenta de Search Console."
+
+        lines = [
+            f"🌐 Propiedades disponibles en Search Console ({len(sites)} total)\n",
+            f"   Usa estas URLs exactas en el parámetro 'site' de cualquier herramienta:\n",
+        ]
+        for site in sites:
+            url = site["siteUrl"]
+            permission = site.get("permissionLevel", "desconocido")
+            lines.append(f"  • {url}   [{permission}]")
+
+        lines.append(
+            f"\n  Ejemplo: gsc_seo_summary(site=\"{sites[0]['siteUrl']}\")"
+        )
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"❌ Error al listar propiedades de Search Console: {e}"
+
+
 # ── Herramientas GA4 ───────────────────────────────────────────────────────────
 
 @mcp.tool()
-def ga4_traffic_summary(days: int = 30) -> str:
+def ga4_traffic_summary(days: int = 30, property_id: str = "") -> str:
     """
-    Devuelve un resumen general del tráfico de swipeup.biz desde Google Analytics 4.
+    Devuelve un resumen general del tráfico desde Google Analytics 4.
     Úsala para preguntas como: ¿cuántas sesiones hemos tenido este mes?, ¿cuántos
     usuarios únicos?, ¿cuál es la tasa de rebote?, ¿ha subido o bajado el tráfico?
 
     Args:
         days: Número de días a analizar hacia atrás desde hoy (por defecto 30).
+        property_id: ID numérico de propiedad GA4 (ej: "257135421"). Si se omite,
+                     usa la propiedad configurada en el .env (swipeup.biz).
     """
     try:
+        prop = resolve_ga4_property(property_id)
         client = get_ga4_client()
         start, end = date_range_str(days)
         prev_start, prev_end = previous_period(start, end)
 
         def fetch(s, e):
             req = RunReportRequest(
-                property=f"properties/{GA4_PROPERTY_ID}",
+                property=f"properties/{prop}",
                 metrics=[
                     Metric(name="sessions"),
                     Metric(name="activeUsers"),
@@ -159,8 +259,10 @@ def ga4_traffic_summary(days: int = 30) -> str:
         minutes = int(duration // 60)
         seconds = int(duration % 60)
 
+        label = f"propiedad {prop}" if prop != DEFAULT_GA4_PROPERTY_ID else "swipeup.biz"
+
         return (
-            f"📊 Resumen GA4 — últimos {days} días ({start} → {end})\n\n"
+            f"📊 Resumen GA4 — {label} — últimos {days} días ({start} → {end})\n\n"
             f"  Sesiones:           {fmt_num(sessions)}  ({trend} vs periodo anterior)\n"
             f"  Usuarios activos:   {fmt_num(users)}\n"
             f"  Usuarios nuevos:    {fmt_num(new_users)}\n"
@@ -174,21 +276,23 @@ def ga4_traffic_summary(days: int = 30) -> str:
 
 
 @mcp.tool()
-def ga4_traffic_by_channel(days: int = 30) -> str:
+def ga4_traffic_by_channel(days: int = 30, property_id: str = "") -> str:
     """
-    Devuelve el tráfico de swipeup.biz desglosado por canal en GA4.
+    Devuelve el tráfico desglosado por canal en GA4.
     Úsala para preguntas como: ¿qué canal trae más tráfico?, ¿cuánto tráfico
     orgánico tenemos?, ¿qué porcentaje viene de redes sociales o email?
 
     Args:
         days: Número de días a analizar (por defecto 30).
+        property_id: ID numérico de propiedad GA4. Si se omite, usa swipeup.biz.
     """
     try:
+        prop = resolve_ga4_property(property_id)
         client = get_ga4_client()
         start, end = date_range_str(days)
 
         req = RunReportRequest(
-            property=f"properties/{GA4_PROPERTY_ID}",
+            property=f"properties/{prop}",
             dimensions=[Dimension(name="sessionDefaultChannelGroup")],
             metrics=[
                 Metric(name="sessions"),
@@ -204,8 +308,9 @@ def ga4_traffic_by_channel(days: int = 30) -> str:
             return "No hay datos de canales para el periodo seleccionado."
 
         total_sessions = sum(int(r.metric_values[0].value) for r in resp.rows)
+        label = f"propiedad {prop}" if prop != DEFAULT_GA4_PROPERTY_ID else "swipeup.biz"
 
-        lines = [f"📡 Tráfico por canal — últimos {days} días ({start} → {end})\n"]
+        lines = [f"📡 Tráfico por canal — {label} — últimos {days} días ({start} → {end})\n"]
         for row in resp.rows:
             channel = row.dimension_values[0].value
             sessions = int(row.metric_values[0].value)
@@ -225,22 +330,24 @@ def ga4_traffic_by_channel(days: int = 30) -> str:
 
 
 @mcp.tool()
-def ga4_top_landing_pages(days: int = 30, limit: int = 10) -> str:
+def ga4_top_landing_pages(days: int = 30, limit: int = 10, property_id: str = "") -> str:
     """
-    Devuelve las páginas de entrada principales de swipeup.biz en GA4.
+    Devuelve las páginas de entrada principales en GA4.
     Úsala para preguntas como: ¿por qué páginas entra la gente?, ¿qué landing
     pages tienen más tráfico?, ¿qué páginas retienen mejor a los usuarios?
 
     Args:
         days: Número de días a analizar (por defecto 30).
         limit: Número máximo de páginas a mostrar (por defecto 10).
+        property_id: ID numérico de propiedad GA4. Si se omite, usa swipeup.biz.
     """
     try:
+        prop = resolve_ga4_property(property_id)
         client = get_ga4_client()
         start, end = date_range_str(days)
 
         req = RunReportRequest(
-            property=f"properties/{GA4_PROPERTY_ID}",
+            property=f"properties/{prop}",
             dimensions=[Dimension(name="landingPage")],
             metrics=[
                 Metric(name="sessions"),
@@ -257,7 +364,8 @@ def ga4_top_landing_pages(days: int = 30, limit: int = 10) -> str:
         if not resp.rows:
             return "No hay datos de landing pages para el periodo seleccionado."
 
-        lines = [f"🏠 Top {limit} landing pages — últimos {days} días ({start} → {end})\n"]
+        label = f"propiedad {prop}" if prop != DEFAULT_GA4_PROPERTY_ID else "swipeup.biz"
+        lines = [f"🏠 Top {limit} landing pages — {label} — últimos {days} días ({start} → {end})\n"]
         for i, row in enumerate(resp.rows, 1):
             page = row.dimension_values[0].value
             sessions = int(row.metric_values[0].value)
@@ -279,16 +387,18 @@ def ga4_top_landing_pages(days: int = 30, limit: int = 10) -> str:
 
 
 @mcp.tool()
-def ga4_period_comparison(current_days: int = 30) -> str:
+def ga4_period_comparison(current_days: int = 30, property_id: str = "") -> str:
     """
-    Compara el tráfico de swipeup.biz en GA4 entre el periodo actual y el anterior.
+    Compara el tráfico en GA4 entre el periodo actual y el anterior.
     Úsala para preguntas como: ¿ha subido o bajado el tráfico este mes?,
     ¿cómo estamos respecto al mes pasado?, ¿ha habido alguna caída relevante?
 
     Args:
         current_days: Duración en días del periodo actual (por defecto 30).
+        property_id: ID numérico de propiedad GA4. Si se omite, usa swipeup.biz.
     """
     try:
+        prop = resolve_ga4_property(property_id)
         client = get_ga4_client()
         start, end = date_range_str(current_days)
         prev_start, prev_end = previous_period(start, end)
@@ -302,7 +412,7 @@ def ga4_period_comparison(current_days: int = 30) -> str:
         metric_names = ["Sesiones", "Usuarios activos", "Páginas vistas", "Usuarios nuevos"]
 
         req = RunReportRequest(
-            property=f"properties/{GA4_PROPERTY_ID}",
+            property=f"properties/{prop}",
             metrics=metrics,
             date_ranges=[
                 DateRange(start_date=start, end_date=end),
@@ -314,14 +424,14 @@ def ga4_period_comparison(current_days: int = 30) -> str:
         if not resp.rows:
             return "No hay datos suficientes para comparar periodos."
 
-        # Con dos date_ranges, GA4 devuelve los datos en la misma fila
         row = resp.rows[0]
         n = len(metrics)
         curr_vals = [int(row.metric_values[i].value) for i in range(n)]
         prev_vals = [int(row.metric_values[i + n].value) for i in range(n)]
 
+        label = f"propiedad {prop}" if prop != DEFAULT_GA4_PROPERTY_ID else "swipeup.biz"
         lines = [
-            f"📈 Comparación de periodos\n"
+            f"📈 Comparación de periodos — {label}\n"
             f"  Actual:   {start} → {end} ({current_days} días)\n"
             f"  Anterior: {prev_start} → {prev_end}\n"
         ]
@@ -345,23 +455,27 @@ def ga4_period_comparison(current_days: int = 30) -> str:
 # ── Herramientas Search Console ────────────────────────────────────────────────
 
 @mcp.tool()
-def gsc_seo_summary(days: int = 30) -> str:
+def gsc_seo_summary(days: int = 30, site: str = "") -> str:
     """
-    Devuelve un resumen SEO general de swipeup.biz desde Google Search Console.
+    Devuelve un resumen SEO general desde Google Search Console.
     Úsala para preguntas como: ¿cuántos clics orgánicos hemos tenido?, ¿cuántas
     impresiones?, ¿cuál es nuestro CTR medio?, ¿cuál es nuestra posición media?
 
     Args:
         days: Número de días a analizar (por defecto 30).
+        site: URL de propiedad en GSC (ej: "sc-domain:ricopesca.com"). Si se
+              omite, usa la propiedad configurada en el .env (swipeup.biz).
+              Usa gsc_list_properties() para ver todas las opciones disponibles.
     """
     try:
+        site_url = resolve_gsc_site(site)
         service = get_gsc_service()
         start, end = date_range_str(days)
         prev_start, prev_end = previous_period(start, end)
 
         def fetch(s, e):
             return service.searchanalytics().query(
-                siteUrl=GSC_SITE_URL,
+                siteUrl=site_url,
                 body={"startDate": s, "endDate": e, "rowLimit": 1},
             ).execute()
 
@@ -383,8 +497,9 @@ def gsc_seo_summary(days: int = 30) -> str:
         clicks_delta = ((c["clicks"] - p["clicks"]) / p["clicks"] * 100) if p["clicks"] else 0
         trend = f"+{clicks_delta:.1f}%" if clicks_delta >= 0 else f"{clicks_delta:.1f}%"
 
+        domain = get_domain_from_gsc_url(site_url)
         return (
-            f"🔍 Resumen SEO — últimos {days} días ({start} → {end})\n\n"
+            f"🔍 Resumen SEO — {domain} — últimos {days} días ({start} → {end})\n\n"
             f"  Clics:             {fmt_num(c['clicks'])}  ({trend} vs periodo anterior)\n"
             f"  Impresiones:       {fmt_num(c['impressions'])}\n"
             f"  CTR medio:         {fmt_pct(c['ctr'])}\n"
@@ -396,9 +511,9 @@ def gsc_seo_summary(days: int = 30) -> str:
 
 
 @mcp.tool()
-def gsc_top_queries(days: int = 30, limit: int = 15) -> str:
+def gsc_top_queries(days: int = 30, limit: int = 15, site: str = "") -> str:
     """
-    Devuelve las principales queries (palabras clave) por las que swipeup.biz
+    Devuelve las principales queries (palabras clave) por las que un sitio
     recibe tráfico desde Google Search.
     Úsala para preguntas como: ¿por qué palabras nos encuentran?, ¿cuáles son
     nuestras keywords principales?, ¿qué términos generan más clics?
@@ -406,13 +521,15 @@ def gsc_top_queries(days: int = 30, limit: int = 15) -> str:
     Args:
         days: Número de días a analizar (por defecto 30).
         limit: Número de queries a mostrar (por defecto 15).
+        site: URL de propiedad en GSC. Si se omite, usa swipeup.biz.
     """
     try:
+        site_url = resolve_gsc_site(site)
         service = get_gsc_service()
         start, end = date_range_str(days)
 
         resp = service.searchanalytics().query(
-            siteUrl=GSC_SITE_URL,
+            siteUrl=site_url,
             body={
                 "startDate": start,
                 "endDate": end,
@@ -426,7 +543,8 @@ def gsc_top_queries(days: int = 30, limit: int = 15) -> str:
         if not rows:
             return "No hay datos de queries para el periodo seleccionado."
 
-        lines = [f"🔎 Top {limit} queries — últimos {days} días ({start} → {end})\n"]
+        domain = get_domain_from_gsc_url(site_url)
+        lines = [f"🔎 Top {limit} queries — {domain} — últimos {days} días ({start} → {end})\n"]
         for i, row in enumerate(rows, 1):
             query = row["keys"][0]
             clicks = int(row.get("clicks", 0))
@@ -446,22 +564,24 @@ def gsc_top_queries(days: int = 30, limit: int = 15) -> str:
 
 
 @mcp.tool()
-def gsc_top_pages(days: int = 30, limit: int = 10) -> str:
+def gsc_top_pages(days: int = 30, limit: int = 10, site: str = "") -> str:
     """
-    Devuelve las páginas de swipeup.biz con más clics desde Google Search.
+    Devuelve las páginas con más clics desde Google Search.
     Úsala para preguntas como: ¿qué páginas reciben más tráfico orgánico?,
     ¿qué URLs funcionan mejor en Google?, ¿qué contenido posiciona más?
 
     Args:
         days: Número de días a analizar (por defecto 30).
         limit: Número de páginas a mostrar (por defecto 10).
+        site: URL de propiedad en GSC. Si se omite, usa swipeup.biz.
     """
     try:
+        site_url = resolve_gsc_site(site)
         service = get_gsc_service()
         start, end = date_range_str(days)
 
         resp = service.searchanalytics().query(
-            siteUrl=GSC_SITE_URL,
+            siteUrl=site_url,
             body={
                 "startDate": start,
                 "endDate": end,
@@ -475,7 +595,8 @@ def gsc_top_pages(days: int = 30, limit: int = 10) -> str:
         if not rows:
             return "No hay datos de páginas para el periodo seleccionado."
 
-        lines = [f"📄 Top {limit} páginas — últimos {days} días ({start} → {end})\n"]
+        domain = get_domain_from_gsc_url(site_url)
+        lines = [f"📄 Top {limit} páginas — {domain} — últimos {days} días ({start} → {end})\n"]
         for i, row in enumerate(rows, 1):
             page = row["keys"][0]
             clicks = int(row.get("clicks", 0))
@@ -495,9 +616,9 @@ def gsc_top_pages(days: int = 30, limit: int = 10) -> str:
 
 
 @mcp.tool()
-def gsc_low_ctr_opportunities(days: int = 30, min_impressions: int = 100, limit: int = 15) -> str:
+def gsc_low_ctr_opportunities(days: int = 30, min_impressions: int = 100, limit: int = 15, site: str = "") -> str:
     """
-    Detecta queries con muchas impresiones pero bajo CTR en swipeup.biz.
+    Detecta queries con muchas impresiones pero bajo CTR.
     Estas son oportunidades SEO: páginas que aparecen en Google pero que la
     gente no clica, normalmente porque el título o la meta descripción no son
     atractivos, o porque la posición media es baja.
@@ -508,13 +629,15 @@ def gsc_low_ctr_opportunities(days: int = 30, min_impressions: int = 100, limit:
         days: Número de días a analizar (por defecto 30).
         min_impressions: Mínimo de impresiones para considerar una query (por defecto 100).
         limit: Número de resultados a mostrar (por defecto 15).
+        site: URL de propiedad en GSC. Si se omite, usa swipeup.biz.
     """
     try:
+        site_url = resolve_gsc_site(site)
         service = get_gsc_service()
         start, end = date_range_str(days)
 
         resp = service.searchanalytics().query(
-            siteUrl=GSC_SITE_URL,
+            siteUrl=site_url,
             body={
                 "startDate": start,
                 "endDate": end,
@@ -528,7 +651,6 @@ def gsc_low_ctr_opportunities(days: int = 30, min_impressions: int = 100, limit:
         if not rows:
             return "No hay datos suficientes para el análisis."
 
-        # Filtramos queries con suficientes impresiones y bajo CTR
         opportunities = [
             r for r in rows
             if r.get("impressions", 0) >= min_impressions and r.get("ctr", 1) < 0.05
@@ -542,8 +664,9 @@ def gsc_low_ctr_opportunities(days: int = 30, min_impressions: int = 100, limit:
                 f"y CTR inferior al 5% en los últimos {days} días."
             )
 
+        domain = get_domain_from_gsc_url(site_url)
         lines = [
-            f"🎯 Oportunidades SEO (alto impresiones, bajo CTR)\n"
+            f"🎯 Oportunidades SEO — {domain}\n"
             f"   Últimos {days} días | mín. {min_impressions} impresiones | CTR < 5%\n"
         ]
         for i, row in enumerate(opportunities, 1):
@@ -565,23 +688,25 @@ def gsc_low_ctr_opportunities(days: int = 30, min_impressions: int = 100, limit:
 
 
 @mcp.tool()
-def gsc_period_comparison(current_days: int = 30) -> str:
+def gsc_period_comparison(current_days: int = 30, site: str = "") -> str:
     """
-    Compara el rendimiento SEO de swipeup.biz entre el periodo actual y el anterior.
+    Compara el rendimiento SEO entre el periodo actual y el anterior.
     Úsala para preguntas como: ¿ha mejorado el SEO este mes?, ¿han subido o bajado
     los clics orgánicos respecto al mes pasado?, ¿ha cambiado la posición media?
 
     Args:
         current_days: Duración en días del periodo actual (por defecto 30).
+        site: URL de propiedad en GSC. Si se omite, usa swipeup.biz.
     """
     try:
+        site_url = resolve_gsc_site(site)
         service = get_gsc_service()
         start, end = date_range_str(current_days)
         prev_start, prev_end = previous_period(start, end)
 
         def fetch(s, e):
             r = service.searchanalytics().query(
-                siteUrl=GSC_SITE_URL,
+                siteUrl=site_url,
                 body={"startDate": s, "endDate": e, "rowLimit": 1},
             ).execute()
             row = r.get("rows", [{}])[0]
@@ -605,8 +730,9 @@ def gsc_period_comparison(current_days: int = 30) -> str:
             tag = "✅" if better else "⚠️"
             return f"{arrow} {sign}{d:.1f}% {tag}"
 
+        domain = get_domain_from_gsc_url(site_url)
         return (
-            f"📊 Comparación SEO\n"
+            f"📊 Comparación SEO — {domain}\n"
             f"  Actual:   {start} → {end}\n"
             f"  Anterior: {prev_start} → {prev_end}\n\n"
             f"  {'Métrica':<20} {'Actual':>12}  {'Anterior':>12}  Cambio\n"
@@ -628,7 +754,7 @@ def gsc_period_comparison(current_days: int = 30) -> str:
 # ── Análisis cruzado GA4 + Search Console ──────────────────────────────────────
 
 @mcp.tool()
-def cross_seo_performance(days: int = 30, limit: int = 10) -> str:
+def cross_seo_performance(days: int = 30, limit: int = 10, site: str = "", property_id: str = "") -> str:
     """
     Cruza datos de GA4 y Search Console para identificar páginas que reciben
     clics orgánicos desde Google (GSC) pero tienen bajo rendimiento en GA4
@@ -640,15 +766,20 @@ def cross_seo_performance(days: int = 30, limit: int = 10) -> str:
     Args:
         days: Número de días a analizar (por defecto 30).
         limit: Número de páginas a mostrar (por defecto 10).
+        site: URL de propiedad en GSC. Si se omite, usa swipeup.biz.
+        property_id: ID numérico de propiedad GA4. Si se omite, usa swipeup.biz.
     """
     try:
+        site_url = resolve_gsc_site(site)
+        prop = resolve_ga4_property(property_id)
         service = get_gsc_service()
         client = get_ga4_client()
         start, end = date_range_str(days)
+        domain = get_domain_from_gsc_url(site_url)
 
         # Datos de Search Console por página
         gsc_resp = service.searchanalytics().query(
-            siteUrl=GSC_SITE_URL,
+            siteUrl=site_url,
             body={
                 "startDate": start,
                 "endDate": end,
@@ -662,12 +793,11 @@ def cross_seo_performance(days: int = 30, limit: int = 10) -> str:
         if not gsc_rows:
             return "No hay datos de Search Console para el periodo seleccionado."
 
-        # Mapa de URL → datos GSC
+        # Mapa de path → datos GSC (normalizamos quitando el dominio)
         gsc_data = {}
         for row in gsc_rows:
             page = row["keys"][0]
-            # Normalizamos la URL para cruzar con GA4 (quitamos el dominio)
-            path = page.replace("https://swipeup.biz", "").replace("http://swipeup.biz", "")
+            path = page.replace(f"https://{domain}", "").replace(f"http://{domain}", "")
             if not path:
                 path = "/"
             gsc_data[path] = {
@@ -679,7 +809,7 @@ def cross_seo_performance(days: int = 30, limit: int = 10) -> str:
 
         # Datos de GA4 por página (landing page)
         ga4_req = RunReportRequest(
-            property=f"properties/{GA4_PROPERTY_ID}",
+            property=f"properties/{prop}",
             dimensions=[Dimension(name="landingPage")],
             metrics=[
                 Metric(name="sessions"),
@@ -716,7 +846,6 @@ def cross_seo_performance(days: int = 30, limit: int = 10) -> str:
                 "duration": ga4.get("duration", None),
             })
 
-        # Ordenamos por clics descendente
         combined.sort(key=lambda x: x["clicks"], reverse=True)
         combined = combined[:limit]
 
@@ -724,7 +853,7 @@ def cross_seo_performance(days: int = 30, limit: int = 10) -> str:
             return "No se encontraron páginas con datos suficientes para el cruce."
 
         lines = [
-            f"🔗 Cruce SEO — últimos {days} días ({start} → {end})\n"
+            f"🔗 Cruce SEO — {domain} — últimos {days} días ({start} → {end})\n"
             f"   Páginas con tráfico orgánico (GSC) y su comportamiento en GA4\n"
         ]
 
@@ -737,7 +866,6 @@ def cross_seo_performance(days: int = 30, limit: int = 10) -> str:
             else:
                 dur_str = "sin datos"
 
-            # Alerta si rebote > 70%
             alert = " ⚠️ alto rebote" if p["bounce"] and p["bounce"] > 70 else ""
 
             lines.append(
@@ -757,7 +885,7 @@ def cross_seo_performance(days: int = 30, limit: int = 10) -> str:
 # ── Arranque del servidor ──────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    if not GA4_PROPERTY_ID or not GSC_SITE_URL:
+    if not DEFAULT_GA4_PROPERTY_ID or not DEFAULT_GSC_SITE_URL:
         print("❌ Faltan variables en el .env (GA4_PROPERTY_ID o GSC_SITE_URL)")
         raise SystemExit(1)
 
