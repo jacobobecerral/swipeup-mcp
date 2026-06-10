@@ -1,0 +1,67 @@
+# ============================================================
+# ARCHIVOS SECRETOS 
+# ============================================================
+
+# Credenciales OAuth de Google Cloud (el archivo que descargaste)
+credentials.json
+
+# Token de acceso generado tras autenticarte con Google
+# Se crea automáticamente la primera vez que ejecutas el servidor
+token.json
+
+# Variables de entorno (IDs de propiedades, configuración)
+.env
+
+# ============================================================
+# PYTHON
+# ============================================================
+
+# Entorno virtual (cada desarrollador crea el suyo en local)
+venv/
+.venv/
+env/
+ENV/
+
+# Archivos compilados de Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+
+# Distribución / empaquetado
+dist/
+build/
+*.egg-info/
+*.egg
+
+# ============================================================
+# SISTEMA OPERATIVO
+# ============================================================
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS (por si alguien del equipo usa Mac en el futuro)
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ============================================================
+# EDITORES / IDEs
+# ============================================================
+
+# VS Code
+.vscode/
+
+# JetBrains (PyCharm, etc.)
+.idea/
+
+# ============================================================
+# LOGS
+# ============================================================
+*.log
+logs/

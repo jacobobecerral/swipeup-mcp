@@ -1,0 +1,21 @@
+# ============================================================
+# Dependencias del proyecto SwipeUp MCP
+# Instalar con: pip install -r requirements.txt
+# ============================================================
+
+# SDK oficial de MCP (Model Context Protocol) de Anthropic
+mcp>=1.0.0
+
+# Cliente oficial de Google Analytics Data API (GA4)
+google-analytics-data>=0.18.0
+
+# Cliente HTTP de Google para APIs REST (Search Console, etc.)
+google-api-python-client>=2.100.0
+
+# Autenticación OAuth2 con Google
+google-auth>=2.23.0
+google-auth-oauthlib>=1.1.0
+google-auth-httplib2>=0.1.1
+
+# Carga de variables de entorno desde archivo .env
+python-dotenv>=1.0.0
