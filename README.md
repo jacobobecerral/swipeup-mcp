@@ -67,22 +67,38 @@ Abrirá el navegador para que autorices el acceso con tu cuenta de Google. Gener
 
 ### 6. Configurar Claude Desktop
 
-Añade esto al archivo de configuración de Claude Desktop (`claude_desktop_config.json`):
+Localiza el archivo de configuración de Claude Desktop. La ruta depende de cómo esté instalado:
+
+**Instalación estándar (descarga directa desde anthropic.com):**
+```
+C:\Users\TU_USUARIO\AppData\Roaming\Claude\
+```
+
+**Instalación desde Microsoft Store:**
+```
+C:\Users\TU_USUARIO\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\
+```
+
+> Si no sabes cuál tienes: abre Claude Desktop → Archivo → Configuración → Extensiones → Configuración avanzada → "Abrir carpeta de configuración de extensiones". Esa es tu carpeta correcta.
+
+Añade la sección `mcpServers` al archivo de configuración que encuentres ahí (sin borrar el contenido existente):
 
 ```json
 {
   "mcpServers": {
     "swipeup-mcp": {
-      "command": "python",
-      "args": ["C:/ruta/a/tu/proyecto/src/server.py"]
+      "command": "C:\\ruta\\a\\tu\\proyecto\\venv\\Scripts\\python.exe",
+      "args": ["C:\\ruta\\a\\tu\\proyecto\\src\\server.py"]
     }
   }
 }
 ```
 
+Sustituye `C:\\ruta\\a\\tu\\proyecto` por la ruta real donde clonaste el repositorio.
+
 ### 7. Ejecutar
 
-Reinicia Claude Desktop. El servidor MCP estará disponible automáticamente.
+Reinicia Claude Desktop completamente. El servidor MCP estará disponible automáticamente en el chat.
 
 ---
 

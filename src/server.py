@@ -32,9 +32,8 @@ from googleapiclient.discovery import build
 
 # ── Configuración ──────────────────────────────────────────────────────────────
 
-load_dotenv()
-
 ROOT_DIR = Path(__file__).parent.parent
+load_dotenv(ROOT_DIR / ".env")
 TOKEN_FILE = ROOT_DIR / os.getenv("GOOGLE_TOKEN_FILE", "token.json")
 CREDENTIALS_FILE = ROOT_DIR / os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 GA4_PROPERTY_ID = os.getenv("GA4_PROPERTY_ID")
