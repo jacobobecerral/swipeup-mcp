@@ -9,8 +9,12 @@ credentials.json
 # Se crea automáticamente la primera vez que ejecutas el servidor
 token.json
 
-# Variables de entorno (IDs de propiedades, configuración)
+# Variables de entorno (configuración local)
 .env
+
+# Registro privado de marcas con sus IDs de GA4 y propiedades de GSC
+clients.json
+clients.tmp
 
 # ============================================================
 # PYTHON

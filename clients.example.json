@@ -1,0 +1,9 @@
+{
+  "_comentario": "Copia este archivo a clients.json (está en .gitignore) y rellénalo con los activos reales.",
+  "marca-ejemplo": {
+    "name": "Marca Ejemplo",
+    "aliases": ["ejemplo"],
+    "gsc_sites": ["sc-domain:ejemplo.com", "https://tienda.ejemplo.com/"],
+    "ga4_property_ids": ["123456789", "987654321"]
+  }
+}

@@ -2,19 +2,14 @@
 
 Servidor MCP que conecta Google Analytics 4 y Google Search Console a un asistente de IA (Claude Desktop).
 
-Permite hacer preguntas en lenguaje natural sobre el rendimiento web de swipeup.biz y obtener respuestas con datos reales en tiempo real.
+Permite hacer preguntas en lenguaje natural sobre el rendimiento web de cada marca y obtener respuestas con datos reales en tiempo real.
 
 ## Ejemplos de uso
 
-**swipeup.biz (configuración por defecto):**
-- *"¿Cómo ha ido el tráfico orgánico este mes?"*
-- *"¿Qué páginas han recibido más clics desde Google?"*
-- *"¿Qué queries tienen muchas impresiones y bajo CTR?"*
-
-**Otros clientes (pasando el parámetro `site` o `property_id`):**
-- *"¿Qué propiedades de Search Console tenemos disponibles?"*
-- *"¿Cómo va el SEO de ricopesca.com este mes?"*
-- *"Compara el tráfico de los dos últimos meses en sc-domain:otrodominio.com"*
+- *"¿Qué marcas tenemos registradas?"*
+- *"¿Cómo ha ido el tráfico orgánico de Marca Ejemplo este mes?"*
+- *"¿Qué queries tienen muchas impresiones y bajo CTR en Marca Ejemplo?"*
+- *"Busca las propiedades de GA4 que contengan 'ejemplo'"*
 
 ---
 
@@ -22,7 +17,7 @@ Permite hacer preguntas en lenguaje natural sobre el rendimiento web de swipeup.
 
 - Python 3.11 o superior
 - Claude Desktop instalado
-- Cuenta de Google con acceso a GA4 y Search Console de swipeup.biz
+- Cuenta de Google con acceso a los GA4 y Search Console de las marcas
 - Proyecto en Google Cloud con las APIs habilitadas (ver Setup)
 
 ---
@@ -52,9 +47,7 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edita el archivo `.env` y rellena:
-- `GA4_PROPERTY_ID` — ID numérico de tu propiedad GA4
-- `GSC_SITE_URL` — URL exacta de tu sitio en Search Console
+Los valores de `.env` son opcionales (propiedad por defecto sin marca). Los activos de cada marca se guardan en `clients.json` (ver "Registro de marcas").
 
 ### 4. Colocar credenciales de Google
 
@@ -69,6 +62,8 @@ python src/auth.py
 ```
 
 Abrirá el navegador para que autorices el acceso con tu cuenta de Google. Generará un `token.json` automáticamente.
+
+Habilita también en Google Cloud la **Google Analytics Data API**, la **Google Analytics Admin API** (necesaria para `ga4_list_properties`) y la **Search Console API**.
 
 ### 6. Configurar Claude Desktop
 
@@ -114,12 +109,15 @@ swipeup-mcp/
 ├── .gitignore           # Archivos excluidos de GitHub
 ├── .env.example         # Plantilla de variables de entorno (SÍ va a GitHub)
 ├── .env                 # Variables de entorno reales (NO va a GitHub)
+├── clients.example.json # Plantilla del registro de marcas (SÍ va a GitHub)
+├── clients.json         # Registro real de marcas e IDs (NO va a GitHub)
 ├── README.md            # Este archivo
 ├── requirements.txt     # Dependencias Python
 ├── credentials.json     # Credenciales OAuth (NO va a GitHub)
 ├── token.json           # Token de acceso (NO va a GitHub, se genera automáticamente)
 └── src/
     ├── auth.py          # Script de autenticación OAuth (ejecutar una vez)
+    ├── registry.py      # Lectura/validación/escritura de clients.json
     └── server.py        # Servidor MCP principal
 ```
 
@@ -142,25 +140,38 @@ Ambas en modo **solo lectura**. El proyecto no escribe ni modifica datos en Goog
 
 ---
 
-## Soporte multi-cliente
+## Registro de marcas (clients.json)
 
-El servidor es compatible con todas las propiedades de Google Analytics y Search Console a las que tenga acceso la cuenta autenticada.
+Cada marca puede tener **varios** activos de Search Console y de GA4. El archivo `clients.json` está en `.gitignore`, así que los IDs reales nunca se suben al repositorio. Se relee en cada consulta: no hace falta reiniciar Claude Desktop al editarlo.
 
-**Descubrir propiedades disponibles:**
-Pregunta a Claude: *"¿Qué propiedades de Search Console tenemos disponibles?"* — usará la herramienta `gsc_list_properties` y te devolverá la lista completa con las URLs exactas.
+```json
+{
+  "marca-ejemplo": {
+    "name": "Marca Ejemplo",
+    "aliases": ["ejemplo"],
+    "gsc_sites": ["sc-domain:ejemplo.com", "sc-domain:ejemplo.fr"],
+    "ga4_property_ids": ["123456789", "987654321"]
+  }
+}
+```
 
-**Consultar otro dominio:**
-Todas las herramientas aceptan parámetros opcionales:
-- `site` — URL exacta de propiedad GSC (ej: `sc-domain:ricopesca.com`)
-- `property_id` — ID numérico de propiedad GA4 (ej: `123456789`)
+**Flujo para añadir una marca:**
+1. `gsc_list_properties(search="marca")` → URLs exactas de Search Console.
+2. `ga4_list_properties(search="marca")` → IDs de propiedad GA4 (y dominio / ID de medición de cada flujo).
+3. `save_client(name="Marca", gsc_sites=[...], ga4_property_ids=[...])`.
+4. `list_clients(verify=True)` → comprueba que la cuenta tiene acceso a todo.
 
-Si se omiten, se usan los valores del `.env` (swipeup.biz por defecto).
+**Consultar:** todas las herramientas aceptan `client="Marca"` y consultan cada activo de la marca (un bloque por activo). `site` y `property_id` explícitos tienen prioridad. `cross_seo_performance` necesita un único par GSC + GA4: indica `site` y `property_id` si la marca tiene varios.
+
+> El ID de propiedad GA4 es solo numérico. El ID de medición (`G-XXXX`) o el de Universal Analytics (`UA-…`) **no** sirven; el MCP los rechaza con un aviso.
+
+**Fechas:** los periodos tienen exactamente N días. Search Console termina 3 días antes de hoy (datos consolidados) y GA4 ayer; el periodo anterior tiene la misma duración y no se solapa.
 
 ---
 
 ## Fases del proyecto
 
-- **Fase 1 (completada):** servidor MCP local, pruebas con Claude Desktop, datos de swipeup.biz, soporte multi-cliente GSC/GA4
+- **Fase 1 (completada):** servidor MCP local, pruebas con Claude Desktop, datos reales, soporte multi-cliente y multi-activo GSC/GA4
 - **Fase 2 (futura):** despliegue en Google Cloud Run, service accounts, acceso compartido sin token.json manual
 
 ---

@@ -9,6 +9,9 @@ mcp>=1.0.0
 # Cliente oficial de Google Analytics Data API (GA4)
 google-analytics-data>=0.18.0
 
+# Cliente oficial de la Google Analytics Admin API (listar propiedades GA4)
+google-analytics-admin>=0.22.0
+
 # Cliente HTTP de Google para APIs REST (Search Console, etc.)
 google-api-python-client>=2.100.0
 

@@ -23,12 +23,14 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-from google.analytics.data_v1beta import BetaAnalyticsDataClient
+from google.analytics.admin_v1beta import AnalyticsAdminServiceClient
 
 # ── Configuración ──────────────────────────────────────────────────────────────
 
-# Cargamos las variables del archivo .env
-load_dotenv()
+ROOT_DIR = Path(__file__).parent.parent
+
+# Cargamos las variables del archivo .env (ruta absoluta, independiente del cwd)
+load_dotenv(ROOT_DIR / ".env")
 
 # Permisos que pedimos a Google (solo lectura)
 SCOPES = [
@@ -39,7 +41,6 @@ SCOPES = [
 # Rutas a los archivos de credenciales
 # Buscamos siempre desde la raíz del proyecto, independientemente
 # de desde dónde se ejecute el script
-ROOT_DIR = Path(__file__).parent.parent
 CREDENTIALS_FILE = ROOT_DIR / os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 TOKEN_FILE = ROOT_DIR / os.getenv("GOOGLE_TOKEN_FILE", "token.json")
 
@@ -82,7 +83,7 @@ def get_credentials() -> Credentials:
                 sys.exit(1)
 
             print("\n🌐 Abriendo el navegador para autenticarte con Google...")
-            print("   Selecciona la cuenta que tiene acceso a GA4 y Search Console de swipeup.biz\n")
+            print("   Selecciona la cuenta que tiene acceso a los GA4 y Search Console de tus marcas\n")
 
             flow = InstalledAppFlow.from_client_secrets_file(
                 str(CREDENTIALS_FILE),
@@ -101,88 +102,54 @@ def get_credentials() -> Credentials:
 
 def verify_ga4(credentials: Credentials) -> bool:
     """
-    Verifica que podemos conectarnos a la Google Analytics Data API.
-    Hace una consulta mínima para confirmar que el acceso funciona.
+    Verifica el acceso a GA4 listando las propiedades visibles para la cuenta
+    (Admin API). No depende de ningún ID concreto en el .env.
     """
-    property_id = os.getenv("GA4_PROPERTY_ID")
-
-    if not property_id:
-        print("\n⚠️  GA4_PROPERTY_ID no está definido en el archivo .env")
-        print("   La autenticación fue correcta pero no podemos verificar GA4.")
-        return False
-
     try:
-        print(f"\n🔍 Verificando conexión con GA4 (propiedad: {property_id})...")
-        client = BetaAnalyticsDataClient(credentials=credentials)
-
-        from google.analytics.data_v1beta.types import (
-            DateRange,
-            Dimension,
-            Metric,
-            RunReportRequest,
-        )
-
-        request = RunReportRequest(
-            property=f"properties/{property_id}",
-            dimensions=[Dimension(name="date")],
-            metrics=[Metric(name="sessions")],
-            date_ranges=[DateRange(start_date="7daysAgo", end_date="today")],
-        )
-
-        response = client.run_report(request)
-        total_sessions = sum(
-            int(row.metric_values[0].value) for row in response.rows
-        )
-
-        print(f"   ✅ GA4 conectado correctamente.")
-        print(f"   📊 Sesiones últimos 7 días: {total_sessions:,}")
+        print("\n🔍 Verificando conexión con GA4 (Admin API)...")
+        admin = AnalyticsAdminServiceClient(credentials=credentials)
+        props = [
+            (ps.display_name, ps.property.split("/")[-1])
+            for summary in admin.list_account_summaries()
+            for ps in summary.property_summaries
+        ]
+        print(f"   ✅ GA4 conectado correctamente. Propiedades visibles: {len(props)}")
+        for name, pid in props[:10]:
+            print(f"      - {name} ({pid})")
+        if len(props) > 10:
+            print(f"      ... y {len(props) - 10} más (usa ga4_list_properties en el MCP)")
         return True
 
     except Exception as e:
         print(f"   ❌ Error al conectar con GA4: {e}")
-        print(f"\n   Posibles causas:")
-        print(f"   - El GA4_PROPERTY_ID del .env es incorrecto")
-        print(f"   - Tu cuenta no tiene acceso a esa propiedad de GA4")
-        print(f"   - La Google Analytics Data API no está habilitada en Google Cloud")
+        print("\n   Posibles causas:")
+        print(f"   - Tu cuenta no tiene acceso a ninguna propiedad de GA4")
+        print(f"   - 'Google Analytics Admin API' no está habilitada en Google Cloud")
+        print(f"   - 'Google Analytics Data API' no está habilitada en Google Cloud")
         return False
 
 
 def verify_gsc(credentials: Credentials) -> bool:
     """
-    Verifica que podemos conectarnos a la Google Search Console API.
-    Lista las propiedades disponibles para confirmar que el acceso funciona.
+    Verifica que podemos conectarnos a la Google Search Console API
+    listando las propiedades disponibles.
     """
-    site_url = os.getenv("GSC_SITE_URL")
-
-    if not site_url:
-        print("\n⚠️  GSC_SITE_URL no está definido en el archivo .env")
-        print("   La autenticación fue correcta pero no podemos verificar Search Console.")
-        return False
-
     try:
-        print(f"\n🔍 Verificando conexión con Search Console ({site_url})...")
+        print("\n🔍 Verificando conexión con Search Console...")
         service = build("searchconsole", "v1", credentials=credentials)
+        sites = [s["siteUrl"] for s in service.sites().list().execute().get("siteEntry", [])]
 
-        # Listamos las propiedades a las que tenemos acceso
-        sites_response = service.sites().list().execute()
-        sites = [s["siteUrl"] for s in sites_response.get("siteEntry", [])]
-
-        print(f"   ✅ Search Console conectado correctamente.")
-        print(f"   🌐 Propiedades disponibles: {len(sites)}")
-        for site in sites:
+        print(f"   ✅ Search Console conectado correctamente. Propiedades: {len(sites)}")
+        for site in sites[:10]:
             print(f"      - {site}")
-
-        if site_url not in sites:
-            print(f"\n   ⚠️  Aviso: '{site_url}' no aparece en tus propiedades de GSC.")
-            print(f"   Comprueba que el GSC_SITE_URL del .env coincide exactamente")
-            print(f"   con la URL que aparece en Search Console.")
-
+        if len(sites) > 10:
+            print(f"      ... y {len(sites) - 10} más (usa gsc_list_properties en el MCP)")
         return True
 
     except Exception as e:
         print(f"   ❌ Error al conectar con Search Console: {e}")
-        print(f"\n   Posibles causas:")
-        print(f"   - Tu cuenta no tiene acceso a esa propiedad de Search Console")
+        print("\n   Posibles causas:")
+        print(f"   - Tu cuenta no tiene acceso a ninguna propiedad de Search Console")
         print(f"   - La Google Search Console API no está habilitada en Google Cloud")
         return False
 
