@@ -21,7 +21,8 @@ Requisitos previos:
 
 import os
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from urllib.parse import unquote, urlsplit
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
@@ -29,6 +30,8 @@ from google.analytics.data_v1beta import BetaAnalyticsDataClient
 from google.analytics.data_v1beta.types import (
     DateRange,
     Dimension,
+    Filter,
+    FilterExpression,
     Metric,
     OrderBy,
     RunReportRequest,
@@ -137,22 +140,25 @@ def get_domain_from_gsc_url(site_url: str) -> str:
 
 # ── Helpers de fechas ──────────────────────────────────────────────────────────
 
-def date_range_str(days: int) -> tuple[str, str]:
-    """Devuelve (start_date, end_date) en formato YYYY-MM-DD para los últimos N días."""
-    end = datetime.today()
-    start = end - timedelta(days=days)
-    return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+def date_range_str(days: int, lag: int = 1) -> tuple[str, str]:
+    """
+    Devuelve (inicio, fin) YYYY-MM-DD de EXACTAMENTE `days` días, terminando
+    `lag` días antes de hoy (los datos más recientes aún no están consolidados).
+    """
+    days = max(1, int(days))
+    end = date.today() - timedelta(days=lag)
+    start = end - timedelta(days=days - 1)
+    return start.isoformat(), end.isoformat()
 
 
 def previous_period(start: str, end: str) -> tuple[str, str]:
-    """Dado un rango de fechas, devuelve el periodo anterior de igual duración."""
-    fmt = "%Y-%m-%d"
-    s = datetime.strptime(start, fmt)
-    e = datetime.strptime(end, fmt)
-    delta = e - s
+    """Periodo inmediatamente anterior, de la misma duración y sin solaparse."""
+    s = datetime.strptime(start, "%Y-%m-%d").date()
+    e = datetime.strptime(end, "%Y-%m-%d").date()
+    length = (e - s).days + 1
     prev_end = s - timedelta(days=1)
-    prev_start = prev_end - delta
-    return prev_start.strftime(fmt), prev_end.strftime(fmt)
+    prev_start = prev_end - timedelta(days=length - 1)
+    return prev_start.isoformat(), prev_end.isoformat()
 
 
 def fmt_pct(value: float) -> str:
@@ -161,6 +167,10 @@ def fmt_pct(value: float) -> str:
 
 def fmt_num(value: float) -> str:
     return f"{int(value):,}"
+
+
+def fmt_duration(seconds: float) -> str:
+    return f"{int(seconds // 60)}m {int(seconds % 60)}s"
 
 
 # ── Herramienta de descubrimiento de propiedades ───────────────────────────────
@@ -415,8 +425,8 @@ def ga4_period_comparison(current_days: int = 30, property_id: str = "") -> str:
             property=f"properties/{prop}",
             metrics=metrics,
             date_ranges=[
-                DateRange(start_date=start, end_date=end),
-                DateRange(start_date=prev_start, end_date=prev_end),
+                DateRange(start_date=start, end_date=end, name="current"),
+                DateRange(start_date=prev_start, end_date=prev_end, name="previous"),
             ],
         )
         resp = client.run_report(req)
@@ -424,10 +434,15 @@ def ga4_period_comparison(current_days: int = 30, property_id: str = "") -> str:
         if not resp.rows:
             return "No hay datos suficientes para comparar periodos."
 
-        row = resp.rows[0]
+        # Con dos rangos GA4 devuelve UNA FILA POR RANGO (dimensión implícita
+        # "dateRange"), no una fila con las métricas duplicadas.
+        by_range = {
+            row.dimension_values[0].value: [float(v.value) for v in row.metric_values]
+            for row in resp.rows
+        }
         n = len(metrics)
-        curr_vals = [int(row.metric_values[i].value) for i in range(n)]
-        prev_vals = [int(row.metric_values[i + n].value) for i in range(n)]
+        curr_vals = by_range.get("current", [0.0] * n)
+        prev_vals = by_range.get("previous", [0.0] * n)
 
         label = f"propiedad {prop}" if prop != DEFAULT_GA4_PROPERTY_ID else "swipeup.biz"
         lines = [
@@ -753,129 +768,133 @@ def gsc_period_comparison(current_days: int = 30, site: str = "") -> str:
 
 # ── Análisis cruzado GA4 + Search Console ──────────────────────────────────────
 
-@mcp.tool()
-def cross_seo_performance(days: int = 30, limit: int = 10, site: str = "", property_id: str = "") -> str:
+def normalize_path(url_or_path: str) -> str | None:
     """
-    Cruza datos de GA4 y Search Console para identificar páginas que reciben
-    clics orgánicos desde Google (GSC) pero tienen bajo rendimiento en GA4
-    (alta tasa de rebote o poca duración de sesión).
+    Reduce una URL completa (GSC) o una ruta con query (GA4) a una ruta
+    comparable: sin dominio, sin query/fragmento, sin barra final, decodificada.
+    """
+    raw = url_or_path.strip()
+    if not raw or raw == "(not set)":
+        return None
+    path = unquote(urlsplit(raw).path) or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    return path.rstrip("/") or "/"
+
+
+@mcp.tool()
+def cross_seo_performance(days: int = 30, limit: int = 10, min_clicks: int = 5,
+                          site: str = "", property_id: str = "") -> str:
+    """
+    Cruza Search Console y GA4 para ver cómo se comportan en la web las páginas
+    que reciben clics desde Google: solo se miran las sesiones de GA4 del canal
+    Organic Search, para comparar manzanas con manzanas.
     Úsala para preguntas como: ¿qué páginas atraen tráfico SEO pero no retienen?,
-    ¿hay páginas que posicionan bien pero decepcionan al usuario?, ¿dónde hay
-    desconexión entre el tráfico orgánico y el comportamiento en la web?
+    ¿hay páginas que posicionan bien pero decepcionan al usuario?
 
     Args:
         days: Número de días a analizar (por defecto 30).
         limit: Número de páginas a mostrar (por defecto 10).
-        site: URL de propiedad en GSC. Si se omite, usa swipeup.biz.
-        property_id: ID numérico de propiedad GA4. Si se omite, usa swipeup.biz.
+        min_clicks: Clics mínimos en GSC para incluir una página (por defecto 5).
+        site: URL de propiedad en GSC. Si se omite, usa la del .env.
+        property_id: ID numérico de propiedad GA4. Si se omite, usa el del .env.
     """
     try:
         site_url = resolve_gsc_site(site)
         prop = resolve_ga4_property(property_id)
         service = get_gsc_service()
-        client = get_ga4_client()
+        ga4 = get_ga4_client()
+        # Mismo rango para ambas fuentes: el límite lo marca el retraso de GSC
         start, end = date_range_str(days)
-        domain = get_domain_from_gsc_url(site_url)
 
-        # Datos de Search Console por página
+        # ── Search Console: por página, agregando variantes de URL ──
+        gsc_data: dict[str, dict] = {}
         gsc_resp = service.searchanalytics().query(
             siteUrl=site_url,
-            body={
-                "startDate": start,
-                "endDate": end,
-                "dimensions": ["page"],
-                "rowLimit": 50,
-                "orderBy": [{"fieldName": "clicks", "sortOrder": "DESCENDING"}],
-            },
+            body={"startDate": start, "endDate": end, "dimensions": ["page"], "rowLimit": 5000},
         ).execute()
+        for row in gsc_resp.get("rows", []):
+            path = normalize_path(row["keys"][0])
+            if path is None:
+                continue
+            d = gsc_data.setdefault(path, {"clicks": 0, "impressions": 0, "pos_x_imp": 0.0})
+            imp = row.get("impressions", 0)
+            d["clicks"] += row.get("clicks", 0)
+            d["impressions"] += imp
+            d["pos_x_imp"] += row.get("position", 0) * imp
+        if not gsc_data:
+            return f"{get_domain_from_gsc_url(site_url)}: no hay datos de Search Console para el periodo."
 
-        gsc_rows = gsc_resp.get("rows", [])
-        if not gsc_rows:
-            return "No hay datos de Search Console para el periodo seleccionado."
-
-        # Mapa de path → datos GSC (normalizamos quitando el dominio)
-        gsc_data = {}
-        for row in gsc_rows:
-            page = row["keys"][0]
-            path = page.replace(f"https://{domain}", "").replace(f"http://{domain}", "")
-            if not path:
-                path = "/"
-            gsc_data[path] = {
-                "clicks": int(row.get("clicks", 0)),
-                "impressions": int(row.get("impressions", 0)),
-                "ctr": row.get("ctr", 0) * 100,
-                "position": row.get("position", 0),
-            }
-
-        # Datos de GA4 por página (landing page)
-        ga4_req = RunReportRequest(
+        # ── GA4: landing pages, solo tráfico orgánico de Google ──
+        ga4_resp = ga4.run_report(RunReportRequest(
             property=f"properties/{prop}",
             dimensions=[Dimension(name="landingPage")],
-            metrics=[
-                Metric(name="sessions"),
-                Metric(name="bounceRate"),
-                Metric(name="averageSessionDuration"),
-            ],
+            metrics=[Metric(name="sessions"), Metric(name="bounceRate"),
+                     Metric(name="averageSessionDuration")],
             date_ranges=[DateRange(start_date=start, end_date=end)],
-            limit=200,
-        )
-        ga4_resp = client.run_report(ga4_req)
+            dimension_filter=FilterExpression(filter=Filter(
+                field_name="sessionDefaultChannelGroup",
+                string_filter=Filter.StringFilter(
+                    value="Organic Search",
+                    match_type=Filter.StringFilter.MatchType.EXACT,
+                ),
+            )),
+            limit=10000,
+        ))
 
-        ga4_data = {}
+        ga4_data: dict[str, dict] = {}
         for row in ga4_resp.rows:
-            path = row.dimension_values[0].value
-            ga4_data[path] = {
-                "sessions": int(row.metric_values[0].value),
-                "bounce": float(row.metric_values[1].value) * 100,
-                "duration": float(row.metric_values[2].value),
-            }
-
-        # Cruce: páginas con clics SEO + datos de GA4
-        combined = []
-        for path, gsc in gsc_data.items():
-            if gsc["clicks"] < 5:
+            path = normalize_path(row.dimension_values[0].value)
+            if path is None:
                 continue
-            ga4 = ga4_data.get(path, {})
+            sessions = int(row.metric_values[0].value)
+            d = ga4_data.setdefault(path, {"sessions": 0, "bounce_x_s": 0.0, "dur_x_s": 0.0})
+            d["sessions"] += sessions
+            d["bounce_x_s"] += float(row.metric_values[1].value) * 100 * sessions
+            d["dur_x_s"] += float(row.metric_values[2].value) * sessions
+
+        # ── Cruce ──
+        combined = []
+        for path, g in gsc_data.items():
+            if g["clicks"] < min_clicks:
+                continue
+            a = ga4_data.get(path)
+            s = a["sessions"] if a else 0
             combined.append({
                 "path": path,
-                "clicks": gsc["clicks"],
-                "position": gsc["position"],
-                "ctr": gsc["ctr"],
-                "sessions": ga4.get("sessions", 0),
-                "bounce": ga4.get("bounce", None),
-                "duration": ga4.get("duration", None),
+                "clicks": g["clicks"],
+                "position": g["pos_x_imp"] / g["impressions"] if g["impressions"] else 0,
+                "ctr": g["clicks"] / g["impressions"] * 100 if g["impressions"] else 0,
+                "sessions": s,
+                "bounce": a["bounce_x_s"] / s if a and s else None,
+                "duration": a["dur_x_s"] / s if a and s else None,
             })
 
         combined.sort(key=lambda x: x["clicks"], reverse=True)
         combined = combined[:limit]
-
         if not combined:
-            return "No se encontraron páginas con datos suficientes para el cruce."
+            return f"No hay páginas con ≥{min_clicks} clics para cruzar en este periodo."
 
         lines = [
-            f"🔗 Cruce SEO — {domain} — últimos {days} días ({start} → {end})\n"
-            f"   Páginas con tráfico orgánico (GSC) y su comportamiento en GA4\n"
+            f"🔗 Cruce SEO — {get_domain_from_gsc_url(site_url)} × propiedad {prop}\n"
+            f"   {days} días ({start} → {end}) | GA4 filtrado a Organic Search\n"
         ]
-
         for i, p in enumerate(combined, 1):
-            bounce_str = fmt_pct(p["bounce"]) if p["bounce"] is not None else "sin datos"
-            if p["duration"] is not None:
-                dur_min = int(p["duration"] // 60)
-                dur_sec = int(p["duration"] % 60)
-                dur_str = f"{dur_min}m {dur_sec}s"
+            if p["bounce"] is None:
+                ga_line = "GA4 → sin sesiones orgánicas para esta página en GA4 (¿otra propiedad/dominio?)"
+                alert = ""
             else:
-                dur_str = "sin datos"
-
-            alert = " ⚠️ alto rebote" if p["bounce"] and p["bounce"] > 70 else ""
-
+                ga_line = (
+                    f"GA4 → Sesiones: {fmt_num(p['sessions'])}  |  "
+                    f"Rebote: {fmt_pct(p['bounce'])}  |  Duración: {fmt_duration(p['duration'])}"
+                )
+                alert = " ⚠️ alto rebote" if p["bounce"] > 70 else ""
             lines.append(
                 f"  {i:>2}. {p['path']}{alert}\n"
                 f"      GSC → Clics: {fmt_num(p['clicks'])}  |  "
                 f"Posición: {p['position']:.1f}  |  CTR: {fmt_pct(p['ctr'])}\n"
-                f"      GA4 → Sesiones: {fmt_num(p['sessions'])}  |  "
-                f"Rebote: {bounce_str}  |  Duración: {dur_str}\n"
+                f"      {ga_line}\n"
             )
-
         return "\n".join(lines)
 
     except Exception as e:
