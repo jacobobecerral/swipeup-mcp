@@ -1,9 +1,18 @@
 {
-  "_comentario": "Copia este archivo a clients.json (está en .gitignore) y rellénalo con los activos reales.",
-  "marca-ejemplo": {
-    "name": "Marca Ejemplo",
-    "aliases": ["ejemplo"],
-    "gsc_sites": ["sc-domain:ejemplo.com", "https://tienda.ejemplo.com/"],
-    "ga4_property_ids": ["123456789", "987654321"]
-  }
+  "_info": "Copia este archivo a clients.json (está en .gitignore) y rellénalo. ga4_property_id: ID numérico (no el G-XXXX), una lista de IDs o null si el cliente no tiene GA4.",
+  "clientes": [
+    {
+      "nombre": "Cliente Ejemplo",
+      "alias": ["ejemplo", "ejemplo.com"],
+      "gsc": ["sc-domain:ejemplo.com", "https://tienda.ejemplo.com/"],
+      "ga4_property_id": "123456789"
+    },
+    {
+      "nombre": "Cliente Sin GA4",
+      "alias": ["sin ga4"],
+      "gsc": ["sc-domain:singa4.com"],
+      "ga4_property_id": null,
+      "_nota": "Las claves que empiezan por _ se ignoran"
+    }
+  ]
 }

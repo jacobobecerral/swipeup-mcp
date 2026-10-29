@@ -2,13 +2,13 @@
 
 Servidor MCP que conecta Google Analytics 4 y Google Search Console a un asistente de IA (Claude Desktop).
 
-Permite hacer preguntas en lenguaje natural sobre el rendimiento web de cada marca y obtener respuestas con datos reales en tiempo real.
+Permite hacer preguntas en lenguaje natural sobre el rendimiento web de cada cliente y obtener respuestas con datos reales en tiempo real.
 
 ## Ejemplos de uso
 
-- *"¿Qué marcas tenemos registradas?"*
-- *"¿Cómo ha ido el tráfico orgánico de Marca Ejemplo este mes?"*
-- *"¿Qué queries tienen muchas impresiones y bajo CTR en Marca Ejemplo?"*
+- *"¿Qué clientes tenemos registrados?"*
+- *"¿Cómo ha ido el tráfico orgánico de Cliente Ejemplo este mes?"*
+- *"¿Qué queries tienen muchas impresiones y bajo CTR en Cliente Ejemplo?"*
 - *"Busca las propiedades de GA4 que contengan 'ejemplo'"*
 
 ---
@@ -17,7 +17,7 @@ Permite hacer preguntas en lenguaje natural sobre el rendimiento web de cada mar
 
 - Python 3.11 o superior
 - Claude Desktop instalado
-- Cuenta de Google con acceso a los GA4 y Search Console de las marcas
+- Cuenta de Google con acceso a los GA4 y Search Console de los clientes
 - Proyecto en Google Cloud con las APIs habilitadas (ver Setup)
 
 ---
@@ -47,7 +47,7 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Los valores de `.env` son opcionales (propiedad por defecto sin marca). Los activos de cada marca se guardan en `clients.json` (ver "Registro de marcas").
+El `.env` solo contiene rutas de archivos. Los activos de cada cliente se guardan en `clients.json` (ver "Registro de clientes").
 
 ### 4. Colocar credenciales de Google
 
@@ -109,8 +109,8 @@ swipeup-mcp/
 ├── .gitignore           # Archivos excluidos de GitHub
 ├── .env.example         # Plantilla de variables de entorno (SÍ va a GitHub)
 ├── .env                 # Variables de entorno reales (NO va a GitHub)
-├── clients.example.json # Plantilla del registro de marcas (SÍ va a GitHub)
-├── clients.json         # Registro real de marcas e IDs (NO va a GitHub)
+├── clients.example.json # Plantilla del registro de clientes (SÍ va a GitHub)
+├── clients.json         # Registro real de clientes e IDs (NO va a GitHub)
 ├── README.md            # Este archivo
 ├── requirements.txt     # Dependencias Python
 ├── credentials.json     # Credenciales OAuth (NO va a GitHub)
@@ -140,28 +140,36 @@ Ambas en modo **solo lectura**. El proyecto no escribe ni modifica datos en Goog
 
 ---
 
-## Registro de marcas (clients.json)
+## Registro de clientes (clients.json)
 
-Cada marca puede tener **varios** activos de Search Console y de GA4. El archivo `clients.json` está en `.gitignore`, así que los IDs reales nunca se suben al repositorio. Se relee en cada consulta: no hace falta reiniciar Claude Desktop al editarlo.
+`clients.json` está en `.gitignore`, así que los IDs reales nunca se suben al repositorio. Se relee en cada consulta: no hace falta reiniciar Claude Desktop al editarlo. Cada cliente tiene un nombre, alias, una o varias propiedades de Search Console y, como mucho, una de GA4 (`null` si no tiene).
 
 ```json
 {
-  "marca-ejemplo": {
-    "name": "Marca Ejemplo",
-    "aliases": ["ejemplo"],
-    "gsc_sites": ["sc-domain:ejemplo.com", "sc-domain:ejemplo.fr"],
-    "ga4_property_ids": ["123456789", "987654321"]
-  }
+  "clientes": [
+    {
+      "nombre": "Cliente Ejemplo",
+      "alias": ["ejemplo", "ejemplo.com"],
+      "gsc": ["sc-domain:ejemplo.com", "https://tienda.ejemplo.com/"],
+      "ga4_property_id": "123456789"
+    }
+  ]
 }
 ```
 
-**Flujo para añadir una marca:**
-1. `gsc_list_properties(search="marca")` → URLs exactas de Search Console.
-2. `ga4_list_properties(search="marca")` → IDs de propiedad GA4 (y dominio / ID de medición de cada flujo).
-3. `save_client(name="Marca", gsc_sites=[...], ga4_property_ids=[...])`.
-4. `list_clients(verify=True)` → comprueba que la cuenta tiene acceso a todo.
+**Consultar:** todas las herramientas aceptan `cliente="Nombre o alias"` (sin importar mayúsculas ni tildes) y resuelven solas la propiedad de GSC y el ID de GA4. `site` y `property_id` explícitos siguen funcionando y tienen prioridad.
 
-**Consultar:** todas las herramientas aceptan `client="Marca"` y consultan cada activo de la marca (un bloque por activo). `site` y `property_id` explícitos tienen prioridad. `cross_seo_performance` necesita un único par GSC + GA4: indica `site` y `property_id` si la marca tiene varios.
+- **Sin valores por defecto:** si no se indica `cliente`, `site` ni `property_id`, la herramienta devuelve un error pidiéndolo. Nunca devuelve datos de un cliente (ni de la agencia) por omisión.
+- **Cliente sin GA4** (`"ga4_property_id": null`): las herramientas de GA4 devuelven el aviso *"Este cliente no tiene propiedad de GA4"*.
+- **Nombre en las cabeceras:** las respuestas muestran el cliente y el ID, p. ej. `Cliente Ejemplo (123456789)`.
+- Un alias ambiguo (p. ej. `ejemplo` si hay varios clientes que lo contienen) devuelve un error con los candidatos.
+- `cross_seo_performance` necesita un único par GSC + GA4: si el cliente tiene varias propiedades de GSC, indica `site`.
+
+**Añadir un cliente:**
+1. `gsc_list_properties(search="texto")` → URLs exactas de Search Console.
+2. `ga4_list_properties(search="texto")` → nombre, ID numérico, cuenta de GA y dominio de cada propiedad de GA4.
+3. `save_client(name=..., gsc_sites=[...], ga4_property_ids=[...], aliases=[...])`.
+4. `list_clients(verify=True)` → comprueba que la cuenta tiene acceso a todo (y avisa de las propiedades de GSC sin verificar).
 
 > El ID de propiedad GA4 es solo numérico. El ID de medición (`G-XXXX`) o el de Universal Analytics (`UA-…`) **no** sirven; el MCP los rechaza con un aviso.
 

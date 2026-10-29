@@ -4,12 +4,14 @@ server.py — Servidor MCP principal de SwipeUp
 Expone herramientas para consultar GA4 y Google Search Console
 desde Claude Desktop u otro cliente compatible con MCP.
 
-Los activos se resuelven así (de mayor a menor prioridad):
-  1. site / property_id explícitos en la llamada.
-  2. client="Marca" → todos los activos de esa marca en clients.json
-     (archivo privado, ignorado en git). Si la marca tiene varios activos,
-     la herramienta consulta cada uno y devuelve un bloque por activo.
-  3. GSC_SITE_URL / GA4_PROPERTY_ID del .env, si existen (opcional).
+Los activos se resuelven así:
+  1. site / property_id explícitos en la llamada (tienen prioridad).
+  2. cliente="Nombre o alias" → activos de ese cliente en clients.json
+     (archivo privado, ignorado en git). Si tiene varias propiedades GSC,
+     la herramienta devuelve un bloque por cada una.
+  3. Si no se indica ninguna de las tres cosas, la herramienta devuelve un
+     error pidiéndolo: NO existe ningún valor por defecto, para no leer
+     datos de un cliente (o de la agencia) por error.
 
 Uso:
     python src/server.py
@@ -51,10 +53,6 @@ ROOT_DIR = Path(__file__).parent.parent
 load_dotenv(ROOT_DIR / ".env")
 TOKEN_FILE = ROOT_DIR / os.getenv("GOOGLE_TOKEN_FILE", "token.json")
 CREDENTIALS_FILE = ROOT_DIR / os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
-
-# Valores por defecto opcionales (sin marca). Normalmente se usa clients.json.
-DEFAULT_GA4_PROPERTY_ID = os.getenv("GA4_PROPERTY_ID") or None
-DEFAULT_GSC_SITE_URL = os.getenv("GSC_SITE_URL") or None
 
 SCOPES = [
     "https://www.googleapis.com/auth/analytics.readonly",
@@ -103,70 +101,59 @@ def get_gsc_service():
     return build("searchconsole", "v1", credentials=get_credentials())
 
 
-# ── Resolución de marcas, dominios y propiedades ──────────────────────────────
+# ── Resolución de clientes, dominios y propiedades ────────────────────────────
 
-def resolve_gsc_sites(client: str, site: str) -> list[str]:
-    """Lista de propiedades GSC a consultar (explícita > marca > .env)."""
+MISSING_TARGET = (
+    "Falta indicar el cliente: pasa 'cliente' (nombre o alias; usa list_clients() "
+    "para verlos) o '{explicit}'. No hay ningún valor por defecto."
+)
+
+
+def resolve_gsc_sites(cliente: str, site: str) -> list[str]:
+    """Propiedades GSC a consultar: 'site' explícito > 'cliente'. Sin ninguno, error."""
     if site and site.strip():
         return [registry.normalize_gsc_site(site)]
-    if client and client.strip():
-        c = registry.find_client(client)
+    if cliente and cliente.strip():
+        c = registry.find_client(cliente)
         if not c.gsc_sites:
-            raise ValueError(
-                f"'{c.name}' no tiene propiedades de Search Console registradas. "
-                "Búscalas con gsc_list_properties() y añádelas con save_client()."
+            raise registry.NotAvailable(
+                f"Este cliente no tiene propiedad de Search Console ({c.name})."
             )
         return list(c.gsc_sites)
-    if DEFAULT_GSC_SITE_URL:
-        return [registry.normalize_gsc_site(DEFAULT_GSC_SITE_URL)]
-    raise ValueError(
-        "Indica 'client' (marca de clients.json) o 'site'. "
-        "Usa list_clients() para ver las marcas registradas."
-    )
+    raise ValueError(MISSING_TARGET.format(explicit="site"))
 
 
-def resolve_ga4_properties(client: str, property_id: str) -> list[str]:
-    """Lista de IDs de propiedad GA4 a consultar (explícito > marca > .env)."""
+def resolve_ga4_properties(cliente: str, property_id: str) -> list[str]:
+    """Propiedades GA4 a consultar: 'property_id' explícito > 'cliente'. Sin ninguno, error."""
     if property_id and str(property_id).strip():
         return [registry.normalize_property_id(property_id)]
-    if client and client.strip():
-        c = registry.find_client(client)
+    if cliente and cliente.strip():
+        c = registry.find_client(cliente)
         if not c.ga4_property_ids:
-            raise ValueError(
-                f"'{c.name}' no tiene propiedades de GA4 registradas. "
-                "Búscalas con ga4_list_properties() y añádelas con save_client()."
+            raise registry.NotAvailable(
+                f"Este cliente no tiene propiedad de GA4 ({c.name})."
             )
         return list(c.ga4_property_ids)
-    if DEFAULT_GA4_PROPERTY_ID:
-        return [registry.normalize_property_id(DEFAULT_GA4_PROPERTY_ID)]
-    raise ValueError(
-        "Indica 'client' (marca de clients.json) o 'property_id'. "
-        "Usa list_clients() para ver las marcas registradas."
-    )
+    raise ValueError(MISSING_TARGET.format(explicit="property_id"))
 
 
-def get_domain_from_gsc_url(site_url: str) -> str:
-    """
-    Extrae el dominio de una propiedad GSC.
-      sc-domain:dominio.com        → dominio.com
-      https://www.dominio.com/blog → www.dominio.com
-    """
-    url = site_url.strip()
-    if url.startswith("sc-domain:"):
-        return url[len("sc-domain:"):]
-    return urlsplit(url).netloc or url
+def fail(what: str, e: Exception) -> str:
+    """Un cliente sin el activo pedido es un aviso (⚠️); cualquier otra cosa, un error."""
+    if isinstance(e, registry.NotAvailable):
+        return f"⚠️ {e}"
+    return f"❌ {what}: {e}"
 
 
 def site_label(site_url: str) -> str:
-    """'Marca Ejemplo · ejemplo.com' si la propiedad está registrada; si no, el dominio."""
-    domain = get_domain_from_gsc_url(site_url)
+    """'Cliente Ejemplo (sc-domain:ejemplo.com)' si está registrada; si no, solo la URL."""
     c = registry.client_for_site(site_url)
-    return f"{c.name} · {domain}" if c else domain
+    return f"{c.name} ({site_url})" if c else f"{site_url} (sin cliente registrado)"
 
 
 def property_label(prop: str) -> str:
+    """'Cliente Ejemplo (123456789)' si está registrada; si no, 'propiedad 123 (sin cliente…)'."""
     c = registry.client_for_property(prop)
-    return f"{c.name} · propiedad {prop}" if c else f"propiedad {prop}"
+    return f"{c.name} ({prop})" if c else f"propiedad {prop} (sin cliente registrado)"
 
 
 def run_each(assets: list[str], fn) -> str:
@@ -249,13 +236,13 @@ def gsc_rows(service, site_url: str, start: str, end: str, dimension: str,
     return rows
 
 
-# ── Herramientas de gestión de marcas ──────────────────────────────────────────
+# ── Herramientas de gestión de clientes ──────────────────────────────────────────
 
 @mcp.tool()
 def list_clients(verify: bool = False) -> str:
     """
-    Lista las marcas registradas en clients.json con sus propiedades de Search
-    Console y de GA4. Úsala primero para saber qué valor pasar en 'client'.
+    Lista los clientes registrados en clients.json con sus propiedades de Search
+    Console y de GA4. Úsala primero para saber qué valor pasar en 'cliente'.
 
     Args:
         verify: Si es True, comprueba contra Google que la cuenta autenticada
@@ -266,16 +253,16 @@ def list_clients(verify: bool = False) -> str:
         clients = registry.load_clients()
         if not clients:
             return (
-                "No hay marcas registradas todavía. Busca activos con "
+                "No hay clientes registrados todavía. Busca activos con "
                 "gsc_list_properties() y ga4_list_properties() y regístralos "
                 "con save_client()."
             )
 
-        gsc_ok, ga4_ok, verify_note = set(), set(), ""
+        gsc_ok, ga4_ok, verify_note = {}, set(), ""
         if verify:
             try:
                 gsc_ok = {
-                    s["siteUrl"]
+                    s["siteUrl"]: s.get("permissionLevel", "")
                     for s in get_gsc_service().sites().list().execute().get("siteEntry", [])
                 }
             except Exception as e:
@@ -292,9 +279,13 @@ def list_clients(verify: bool = False) -> str:
         def mark(ok_set, value, enabled):
             if not verify or not enabled:
                 return ""
-            return "  ✅ acceso" if value in ok_set else "  ❌ SIN ACCESO / no encontrada"
+            if value not in ok_set:
+                return "  ❌ SIN ACCESO / no encontrada"
+            if isinstance(ok_set, dict) and ok_set[value] == "siteUnverifiedUser":
+                return "  ⚠️ sin verificar: no devolverá datos"
+            return "  ✅ acceso"
 
-        lines = [f"🏷️ Marcas registradas ({len(clients)})\n"]
+        lines = [f"🏷️ Clientes registrados ({len(clients)})\n"]
         for c in clients.values():
             alias = f"  (alias: {', '.join(c.aliases)})" if c.aliases else ""
             lines.append(f"■ {c.name}{alias}")
@@ -310,7 +301,7 @@ def list_clients(verify: bool = False) -> str:
         return "\n".join(lines) + verify_note
 
     except Exception as e:
-        return f"❌ Error al leer las marcas: {e}"
+        return f"❌ Error al leer los clientes: {e}"
 
 
 @mcp.tool()
@@ -321,27 +312,27 @@ def save_client(
     aliases: list[str] | None = None,
 ) -> str:
     """
-    Crea una marca en clients.json o AÑADE activos a una existente (no borra
+    Crea un cliente en clients.json o AÑADE activos a una existente (no borra
     los que ya había). El archivo es local y está ignorado en git.
 
     Args:
-        name: Nombre de la marca (ej: "Marca Ejemplo"). Identifica a la marca.
+        name: Nombre del cliente (ej: "Marca Ejemplo"). Identifica al cliente.
         gsc_sites: Propiedades de Search Console, tal como las devuelve
                    gsc_list_properties() (ej: ["sc-domain:ejemplo.com"]).
         ga4_property_ids: IDs numéricos de propiedad GA4, tal como los devuelve
                    ga4_list_properties() (NO el ID de medición "G-XXXX").
-        aliases: Otros nombres con los que se puede referir a la marca.
+        aliases: Otros nombres con los que se puede referir al cliente.
     """
     try:
         c = registry.save_client(name, gsc_sites, ga4_property_ids, aliases)
         return (
-            f"✅ Marca '{c.name}' guardada en {registry.clients_path().name}\n"
+            f"✅ Cliente '{c.name}' guardado en {registry.clients_path().name}\n"
             f"   Search Console: {', '.join(c.gsc_sites) or '—'}\n"
             f"   GA4:            {', '.join(c.ga4_property_ids) or '—'}\n"
             f"   Compruébala con list_clients(verify=True)."
         )
     except Exception as e:
-        return f"❌ No se pudo guardar la marca: {e}"
+        return f"❌ No se pudo guardar el cliente: {e}"
 
 
 # ── Herramientas de descubrimiento ─────────────────────────────────────────────
@@ -351,7 +342,7 @@ def gsc_list_properties(search: str = "") -> str:
     """
     Lista las propiedades de Google Search Console a las que tiene acceso la
     cuenta autenticada, con la URL exacta que hay que registrar o pasar en
-    'site'. Marca cuáles ya están asignadas a una marca de clients.json.
+    'site'. Marca cuáles ya están asignadas a un cliente de clients.json.
 
     Args:
         search: Texto para filtrar (ej: "ejemplo"). Vacío = todas.
@@ -374,7 +365,7 @@ def gsc_list_properties(search: str = "") -> str:
             url = s["siteUrl"]
             perm = s.get("permissionLevel", "desconocido")
             owner = registry.client_for_site(registry.normalize_gsc_site(url))
-            tag = f"  → {owner.name}" if owner else "  (sin asignar a ninguna marca)"
+            tag = f"  → {owner.name}" if owner else "  (sin asignar a ningún cliente)"
             warn = "  ⚠️ sin verificar: no devolverá datos" if perm == "siteUnverifiedUser" else ""
             lines.append(f"  • {url}   [{perm}]{tag}{warn}")
         lines.append("\n  Para registrarlas: save_client(name=..., gsc_sites=[...])")
@@ -393,7 +384,7 @@ def ga4_list_properties(search: str = "", include_streams: bool = True) -> str:
 
     Para cada propiedad muestra los flujos de datos web (URL del sitio e ID de
     medición G-XXXX), útiles para saber a qué dominio corresponde cada una.
-    Marca cuáles ya están asignadas a una marca de clients.json.
+    Marca cuáles ya están asignadas a un cliente de clients.json.
 
     Args:
         search: Texto para filtrar por nombre de cuenta, nombre de propiedad,
@@ -446,7 +437,7 @@ def ga4_list_properties(search: str = "", include_streams: bool = True) -> str:
                 lines.append(f"Cuenta GA: {account}")
                 current_account = account
             owner = registry.client_for_property(pid)
-            tag = f"→ {owner.name}" if owner else "(sin asignar a ninguna marca)"
+            tag = f"→ {owner.name}" if owner else "(sin asignar a ningún cliente)"
             lines.append(f"  • {pname}")
             lines.append(f"      ID de propiedad: {pid}   {tag}")
             lines += [f"      Flujo: {s}" for s in streams if include_streams]
@@ -472,7 +463,7 @@ def ga4_list_properties(search: str = "", include_streams: bool = True) -> str:
 # ── Herramientas GA4 ───────────────────────────────────────────────────────────
 
 @mcp.tool()
-def ga4_traffic_summary(days: int = 30, client: str = "", property_id: str = "") -> str:
+def ga4_traffic_summary(days: int = 30, cliente: str = "", property_id: str = "") -> str:
     """
     Devuelve un resumen general del tráfico desde Google Analytics 4.
     Úsala para preguntas como: ¿cuántas sesiones hemos tenido este mes?, ¿cuántos
@@ -480,13 +471,13 @@ def ga4_traffic_summary(days: int = 30, client: str = "", property_id: str = "")
 
     Args:
         days: Número de días a analizar (por defecto 30). Termina ayer.
-        client: Marca registrada en clients.json (ej: "Marca Ejemplo"). Si tiene
+        cliente: Nombre o alias de un cliente de clients.json (ej: "Marca Ejemplo"). Si tiene
                 varias propiedades GA4, devuelve un bloque por cada una.
         property_id: ID numérico de una propiedad GA4 concreta (tiene prioridad
-                sobre 'client'). Usa ga4_list_properties() para encontrarlo.
+                sobre 'cliente'). Usa ga4_list_properties() para encontrarlo.
     """
     try:
-        props = resolve_ga4_properties(client, property_id)
+        props = resolve_ga4_properties(cliente, property_id)
         ga4 = get_ga4_client()
         start, end = date_range_str(days)
         prev_start, prev_end = previous_period(start, end)
@@ -528,11 +519,11 @@ def ga4_traffic_summary(days: int = 30, client: str = "", property_id: str = "")
         return run_each(props, one)
 
     except Exception as e:
-        return f"❌ Error al consultar GA4: {e}"
+        return fail("Error al consultar GA4", e)
 
 
 @mcp.tool()
-def ga4_traffic_by_channel(days: int = 30, client: str = "", property_id: str = "") -> str:
+def ga4_traffic_by_channel(days: int = 30, cliente: str = "", property_id: str = "") -> str:
     """
     Devuelve el tráfico desglosado por canal en GA4.
     Úsala para preguntas como: ¿qué canal trae más tráfico?, ¿cuánto tráfico
@@ -540,11 +531,11 @@ def ga4_traffic_by_channel(days: int = 30, client: str = "", property_id: str = 
 
     Args:
         days: Número de días a analizar (por defecto 30).
-        client: Marca registrada en clients.json (consulta todas sus propiedades GA4).
-        property_id: ID numérico de una propiedad GA4 concreta (tiene prioridad sobre 'client').
+        cliente: Nombre o alias de un cliente de clients.json (consulta todas sus propiedades GA4).
+        property_id: ID numérico de una propiedad GA4 concreta (tiene prioridad sobre 'cliente').
     """
     try:
-        props = resolve_ga4_properties(client, property_id)
+        props = resolve_ga4_properties(cliente, property_id)
         ga4 = get_ga4_client()
         start, end = date_range_str(days)
 
@@ -575,11 +566,11 @@ def ga4_traffic_by_channel(days: int = 30, client: str = "", property_id: str = 
         return run_each(props, one)
 
     except Exception as e:
-        return f"❌ Error al consultar GA4: {e}"
+        return fail("Error al consultar GA4", e)
 
 
 @mcp.tool()
-def ga4_top_landing_pages(days: int = 30, limit: int = 10, client: str = "", property_id: str = "") -> str:
+def ga4_top_landing_pages(days: int = 30, limit: int = 10, cliente: str = "", property_id: str = "") -> str:
     """
     Devuelve las páginas de entrada principales en GA4.
     Úsala para preguntas como: ¿por qué páginas entra la gente?, ¿qué landing
@@ -588,11 +579,11 @@ def ga4_top_landing_pages(days: int = 30, limit: int = 10, client: str = "", pro
     Args:
         days: Número de días a analizar (por defecto 30).
         limit: Número máximo de páginas a mostrar (por defecto 10).
-        client: Marca registrada en clients.json (consulta todas sus propiedades GA4).
-        property_id: ID numérico de una propiedad GA4 concreta (tiene prioridad sobre 'client').
+        cliente: Nombre o alias de un cliente de clients.json (consulta todas sus propiedades GA4).
+        property_id: ID numérico de una propiedad GA4 concreta (tiene prioridad sobre 'cliente').
     """
     try:
-        props = resolve_ga4_properties(client, property_id)
+        props = resolve_ga4_properties(cliente, property_id)
         ga4 = get_ga4_client()
         start, end = date_range_str(days)
 
@@ -622,11 +613,11 @@ def ga4_top_landing_pages(days: int = 30, limit: int = 10, client: str = "", pro
         return run_each(props, one)
 
     except Exception as e:
-        return f"❌ Error al consultar GA4: {e}"
+        return fail("Error al consultar GA4", e)
 
 
 @mcp.tool()
-def ga4_period_comparison(current_days: int = 30, client: str = "", property_id: str = "") -> str:
+def ga4_period_comparison(current_days: int = 30, cliente: str = "", property_id: str = "") -> str:
     """
     Compara el tráfico en GA4 entre el periodo actual y el anterior.
     Úsala para preguntas como: ¿ha subido o bajado el tráfico este mes?,
@@ -634,11 +625,11 @@ def ga4_period_comparison(current_days: int = 30, client: str = "", property_id:
 
     Args:
         current_days: Duración en días del periodo actual (por defecto 30).
-        client: Marca registrada en clients.json (consulta todas sus propiedades GA4).
-        property_id: ID numérico de una propiedad GA4 concreta (tiene prioridad sobre 'client').
+        cliente: Nombre o alias de un cliente de clients.json (consulta todas sus propiedades GA4).
+        property_id: ID numérico de una propiedad GA4 concreta (tiene prioridad sobre 'cliente').
     """
     try:
-        props = resolve_ga4_properties(client, property_id)
+        props = resolve_ga4_properties(cliente, property_id)
         ga4 = get_ga4_client()
         start, end = date_range_str(current_days)
         prev_start, prev_end = previous_period(start, end)
@@ -683,13 +674,13 @@ def ga4_period_comparison(current_days: int = 30, client: str = "", property_id:
         return run_each(props, one)
 
     except Exception as e:
-        return f"❌ Error al consultar GA4: {e}"
+        return fail("Error al consultar GA4", e)
 
 
 # ── Herramientas Search Console ────────────────────────────────────────────────
 
 @mcp.tool()
-def gsc_seo_summary(days: int = 30, client: str = "", site: str = "") -> str:
+def gsc_seo_summary(days: int = 30, cliente: str = "", site: str = "") -> str:
     """
     Devuelve un resumen SEO general desde Google Search Console.
     Úsala para preguntas como: ¿cuántos clics orgánicos hemos tenido?, ¿cuántas
@@ -698,13 +689,13 @@ def gsc_seo_summary(days: int = 30, client: str = "", site: str = "") -> str:
     Args:
         days: Número de días a analizar (por defecto 30). Termina 3 días antes
               de hoy, cuando Search Console ya tiene datos consolidados.
-        client: Marca registrada en clients.json (ej: "Marca Ejemplo"). Si tiene
+        cliente: Nombre o alias de un cliente de clients.json (ej: "Marca Ejemplo"). Si tiene
                 varias propiedades GSC, devuelve un bloque por cada una.
         site: Propiedad GSC concreta (ej: "sc-domain:dominio.com"); tiene
-              prioridad sobre 'client'. Usa gsc_list_properties() para verlas.
+              prioridad sobre 'cliente'. Usa gsc_list_properties() para verlas.
     """
     try:
-        sites = resolve_gsc_sites(client, site)
+        sites = resolve_gsc_sites(cliente, site)
         service = get_gsc_service()
         start, end = date_range_str(days, GSC_DATA_LAG_DAYS)
         prev_start, prev_end = previous_period(start, end)
@@ -727,12 +718,12 @@ def gsc_seo_summary(days: int = 30, client: str = "", site: str = "") -> str:
         return run_each(sites, one)
 
     except Exception as e:
-        return f"❌ Error al consultar Search Console: {e}"
+        return fail("Error al consultar Search Console", e)
 
 
 def _gsc_ranking(title_icon: str, title: str, dimension: str, days: int, limit: int,
-                 client: str, site: str) -> str:
-    sites = resolve_gsc_sites(client, site)
+                 cliente: str, site: str) -> str:
+    sites = resolve_gsc_sites(cliente, site)
     service = get_gsc_service()
     start, end = date_range_str(days, GSC_DATA_LAG_DAYS)
 
@@ -753,7 +744,7 @@ def _gsc_ranking(title_icon: str, title: str, dimension: str, days: int, limit: 
 
 
 @mcp.tool()
-def gsc_top_queries(days: int = 30, limit: int = 15, client: str = "", site: str = "") -> str:
+def gsc_top_queries(days: int = 30, limit: int = 15, cliente: str = "", site: str = "") -> str:
     """
     Devuelve las principales queries (palabras clave) por las que un sitio
     recibe tráfico desde Google Search.
@@ -763,17 +754,17 @@ def gsc_top_queries(days: int = 30, limit: int = 15, client: str = "", site: str
     Args:
         days: Número de días a analizar (por defecto 30).
         limit: Número de queries a mostrar (por defecto 15).
-        client: Marca registrada en clients.json (consulta todas sus propiedades GSC).
-        site: Propiedad GSC concreta; tiene prioridad sobre 'client'.
+        cliente: Nombre o alias de un cliente de clients.json (consulta todas sus propiedades GSC).
+        site: Propiedad GSC concreta; tiene prioridad sobre 'cliente'.
     """
     try:
-        return _gsc_ranking("🔎", "queries", "query", days, limit, client, site)
+        return _gsc_ranking("🔎", "queries", "query", days, limit, cliente, site)
     except Exception as e:
-        return f"❌ Error al consultar Search Console: {e}"
+        return fail("Error al consultar Search Console", e)
 
 
 @mcp.tool()
-def gsc_top_pages(days: int = 30, limit: int = 10, client: str = "", site: str = "") -> str:
+def gsc_top_pages(days: int = 30, limit: int = 10, cliente: str = "", site: str = "") -> str:
     """
     Devuelve las páginas con más clics desde Google Search.
     Úsala para preguntas como: ¿qué páginas reciben más tráfico orgánico?,
@@ -782,18 +773,18 @@ def gsc_top_pages(days: int = 30, limit: int = 10, client: str = "", site: str =
     Args:
         days: Número de días a analizar (por defecto 30).
         limit: Número de páginas a mostrar (por defecto 10).
-        client: Marca registrada en clients.json (consulta todas sus propiedades GSC).
-        site: Propiedad GSC concreta; tiene prioridad sobre 'client'.
+        cliente: Nombre o alias de un cliente de clients.json (consulta todas sus propiedades GSC).
+        site: Propiedad GSC concreta; tiene prioridad sobre 'cliente'.
     """
     try:
-        return _gsc_ranking("📄", "páginas", "page", days, limit, client, site)
+        return _gsc_ranking("📄", "páginas", "page", days, limit, cliente, site)
     except Exception as e:
-        return f"❌ Error al consultar Search Console: {e}"
+        return fail("Error al consultar Search Console", e)
 
 
 @mcp.tool()
 def gsc_low_ctr_opportunities(days: int = 30, min_impressions: int = 100, limit: int = 15,
-                              max_ctr: float = 5.0, client: str = "", site: str = "") -> str:
+                              max_ctr: float = 5.0, cliente: str = "", site: str = "") -> str:
     """
     Detecta queries con muchas impresiones pero bajo CTR.
     Estas son oportunidades SEO: páginas que aparecen en Google pero que la
@@ -807,11 +798,11 @@ def gsc_low_ctr_opportunities(days: int = 30, min_impressions: int = 100, limit:
         min_impressions: Mínimo de impresiones para considerar una query (por defecto 100).
         limit: Número de resultados a mostrar (por defecto 15).
         max_ctr: CTR máximo, en porcentaje, para considerar una oportunidad (por defecto 5).
-        client: Marca registrada en clients.json (consulta todas sus propiedades GSC).
-        site: Propiedad GSC concreta; tiene prioridad sobre 'client'.
+        cliente: Nombre o alias de un cliente de clients.json (consulta todas sus propiedades GSC).
+        site: Propiedad GSC concreta; tiene prioridad sobre 'cliente'.
     """
     try:
-        sites = resolve_gsc_sites(client, site)
+        sites = resolve_gsc_sites(cliente, site)
         service = get_gsc_service()
         start, end = date_range_str(days, GSC_DATA_LAG_DAYS)
 
@@ -842,11 +833,11 @@ def gsc_low_ctr_opportunities(days: int = 30, min_impressions: int = 100, limit:
         return run_each(sites, one)
 
     except Exception as e:
-        return f"❌ Error al consultar Search Console: {e}"
+        return fail("Error al consultar Search Console", e)
 
 
 @mcp.tool()
-def gsc_period_comparison(current_days: int = 30, client: str = "", site: str = "") -> str:
+def gsc_period_comparison(current_days: int = 30, cliente: str = "", site: str = "") -> str:
     """
     Compara el rendimiento SEO entre el periodo actual y el anterior.
     Úsala para preguntas como: ¿ha mejorado el SEO este mes?, ¿han subido o bajado
@@ -854,11 +845,11 @@ def gsc_period_comparison(current_days: int = 30, client: str = "", site: str = 
 
     Args:
         current_days: Duración en días del periodo actual (por defecto 30).
-        client: Marca registrada en clients.json (consulta todas sus propiedades GSC).
-        site: Propiedad GSC concreta; tiene prioridad sobre 'client'.
+        cliente: Nombre o alias de un cliente de clients.json (consulta todas sus propiedades GSC).
+        site: Propiedad GSC concreta; tiene prioridad sobre 'cliente'.
     """
     try:
-        sites = resolve_gsc_sites(client, site)
+        sites = resolve_gsc_sites(cliente, site)
         service = get_gsc_service()
         start, end = date_range_str(current_days, GSC_DATA_LAG_DAYS)
         prev_start, prev_end = previous_period(start, end)
@@ -892,7 +883,7 @@ def gsc_period_comparison(current_days: int = 30, client: str = "", site: str = 
         return run_each(sites, one)
 
     except Exception as e:
-        return f"❌ Error al consultar Search Console: {e}"
+        return fail("Error al consultar Search Console", e)
 
 
 # ── Análisis cruzado GA4 + Search Console ──────────────────────────────────────
@@ -913,7 +904,7 @@ def normalize_path(url_or_path: str) -> str | None:
 
 @mcp.tool()
 def cross_seo_performance(days: int = 30, limit: int = 10, min_clicks: int = 5,
-                          client: str = "", site: str = "", property_id: str = "") -> str:
+                          cliente: str = "", site: str = "", property_id: str = "") -> str:
     """
     Cruza Search Console y GA4 para ver cómo se comportan en la web las páginas
     que reciben clics desde Google: solo se miran las sesiones de GA4 del canal
@@ -921,20 +912,20 @@ def cross_seo_performance(days: int = 30, limit: int = 10, min_clicks: int = 5,
     Úsala para preguntas como: ¿qué páginas atraen tráfico SEO pero no retienen?,
     ¿hay páginas que posicionan bien pero decepcionan al usuario?
 
-    Necesita UNA propiedad GSC y UNA propiedad GA4. Si la marca tiene varias de
+    Necesita UNA propiedad GSC y UNA propiedad GA4. Si el cliente tiene varias de
     cada, indica cuál con 'site' y 'property_id' (usa list_clients()).
 
     Args:
         days: Número de días a analizar (por defecto 30).
         limit: Número de páginas a mostrar (por defecto 10).
         min_clicks: Clics mínimos en GSC para incluir una página (por defecto 5).
-        client: Marca registrada en clients.json.
-        site: Propiedad GSC concreta (tiene prioridad sobre 'client').
-        property_id: ID de propiedad GA4 concreta (tiene prioridad sobre 'client').
+        cliente: Nombre o alias de un cliente de clients.json.
+        site: Propiedad GSC concreta (tiene prioridad sobre 'cliente').
+        property_id: ID de propiedad GA4 concreta (tiene prioridad sobre 'cliente').
     """
     try:
-        sites = resolve_gsc_sites(client, site)
-        props = resolve_ga4_properties(client, property_id)
+        sites = resolve_gsc_sites(cliente, site)
+        props = resolve_ga4_properties(cliente, property_id)
         if len(sites) != 1 or len(props) != 1:
             return (
                 "⚠️ El cruce necesita una única propiedad GSC y una única propiedad GA4, "
@@ -1037,7 +1028,7 @@ def cross_seo_performance(days: int = 30, limit: int = 10, min_clicks: int = 5,
         return "\n".join(lines)
 
     except Exception as e:
-        return f"❌ Error en análisis cruzado: {e}"
+        return fail("Error en análisis cruzado", e)
 
 
 # ── Arranque del servidor ──────────────────────────────────────────────────────
@@ -1048,10 +1039,10 @@ if __name__ == "__main__":
         print("❌ No existe token.json. Ejecuta primero: python src/auth.py", file=sys.stderr)
         raise SystemExit(1)
 
-    if not registry.clients_path().exists() and not (DEFAULT_GA4_PROPERTY_ID or DEFAULT_GSC_SITE_URL):
+    if not registry.clients_path().exists():
         print(
-            "⚠️ No hay clients.json ni valores por defecto en .env. El servidor arranca, "
-            "pero hay que pasar site/property_id o registrar marcas con save_client().",
+            "⚠️ No hay clients.json. El servidor arranca, pero hay que pasar "
+            "site/property_id o registrar clientes con save_client().",
             file=sys.stderr,
         )
 

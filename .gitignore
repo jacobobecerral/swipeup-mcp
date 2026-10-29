@@ -15,6 +15,7 @@ token.json
 # Registro privado de marcas con sus IDs de GA4 y propiedades de GSC
 clients.json
 clients.tmp
+clients.json.bak
 
 # ============================================================
 # PYTHON

@@ -1,19 +1,26 @@
 """
-registry.py — Registro privado de marcas (clients.json)
+registry.py — Registro privado de clientes (clients.json)
 
-Cada marca puede tener varios activos de Search Console y varias propiedades
-de GA4. El archivo clients.json está en .gitignore: los IDs reales nunca
-llegan al repositorio. En git solo va clients.example.json.
+Cada cliente tiene un nombre, alias, una o varias propiedades de Search
+Console y como mucho una propiedad de GA4 (null si no tiene). El archivo
+clients.json está en .gitignore: los IDs reales nunca llegan al repositorio.
+En git solo va clients.example.json.
 
 Formato de clients.json:
 {
-  "marca-ejemplo": {
-    "name": "Marca Ejemplo",
-    "aliases": ["ejemplo"],
-    "gsc_sites": ["sc-domain:ejemplo.com", "https://tienda.ejemplo.com/"],
-    "ga4_property_ids": ["123456789", "987654321"]
-  }
+  "clientes": [
+    {
+      "nombre": "Cliente Ejemplo",
+      "alias": ["ejemplo", "ejemplo.com"],
+      "gsc": ["sc-domain:ejemplo.com", "https://tienda.ejemplo.com/"],
+      "ga4_property_id": "123456789"
+    }
+  ]
 }
+
+También se aceptan los nombres name/aliases/gsc_sites/ga4_property_ids, una
+lista de IDs en ga4_property_id, y un objeto {clave: {...}} en lugar de la
+lista "clientes". Las claves que empiezan por "_" (_info, _nota) se ignoran.
 
 El archivo se relee en cada consulta, así que se puede editar sin reiniciar
 el servidor MCP.
@@ -27,6 +34,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).parent.parent
+
+
+class NotAvailable(ValueError):
+    """El cliente existe, pero no tiene el activo pedido: es un aviso, no un fallo."""
 
 
 def clients_path() -> Path:
@@ -45,7 +56,7 @@ class Client:
 # ── Normalización y validación ─────────────────────────────────────────────────
 
 def slugify(text: str) -> str:
-    """'Marca Ejemplo' → 'marca-ejemplo' (sin tildes, minúsculas)."""
+    """'Cliente Ejemplo' → 'cliente-ejemplo' (sin tildes, minúsculas)."""
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
 
@@ -90,72 +101,101 @@ def _as_list(value) -> list:
     return [value]
 
 
-def _dedupe(items: list[str]) -> list[str]:
+def _dedupe(items) -> list:
     return list(dict.fromkeys(items))
+
+
+def _first(entry: dict, *names):
+    for n in names:
+        if n in entry:
+            return entry[n]
+    return None
 
 
 # ── Lectura ────────────────────────────────────────────────────────────────────
 
-def _read_raw() -> dict:
+def _read_raw() -> tuple[dict, list[dict]]:
+    """Devuelve (metadatos del nivel superior, lista de entradas en bruto)."""
     path = clients_path()
     if not path.exists():
-        return {}
+        return {}, []
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         raise ValueError(f"{path.name} no es un JSON válido: {e}") from e
     if not isinstance(data, dict):
-        raise ValueError(f"{path.name} debe ser un objeto {{marca: {{...}}}}.")
-    return data
+        raise ValueError(f"{path.name} debe ser un objeto JSON.")
+
+    if isinstance(data.get("clientes"), list):
+        meta = {k: v for k, v in data.items() if k != "clientes"}
+        return meta, [e for e in data["clientes"] if isinstance(e, dict)]
+
+    # Formato antiguo: {clave: {name, ...}}
+    meta = {k: v for k, v in data.items() if k.startswith("_")}
+    entries = []
+    for key, e in data.items():
+        if not key.startswith("_") and isinstance(e, dict):
+            entries.append({"nombre": e.get("name") or e.get("nombre") or key, **e})
+    return meta, entries
+
+
+def _parse(entry: dict) -> Client:
+    name = str(_first(entry, "nombre", "name") or "").strip()
+    if not name:
+        raise ValueError("hay un cliente sin 'nombre'.")
+    try:
+        return Client(
+            key=slugify(name),
+            name=name,
+            aliases=[str(a) for a in _as_list(_first(entry, "alias", "aliases"))],
+            gsc_sites=_dedupe(
+                normalize_gsc_site(s) for s in _as_list(_first(entry, "gsc", "gsc_sites"))
+            ),
+            ga4_property_ids=_dedupe(
+                normalize_property_id(p)
+                for p in _as_list(_first(entry, "ga4_property_id", "ga4_property_ids"))
+            ),
+        )
+    except ValueError as e:
+        raise ValueError(f"Cliente '{name}' en {clients_path().name}: {e}") from e
 
 
 def load_clients() -> dict[str, Client]:
-    """Carga y valida todas las marcas. Devuelve {} si no existe el archivo."""
-    clients = {}
-    for key, entry in _read_raw().items():
-        if key.startswith("_"):  # permite claves de comentario
-            continue
-        try:
-            clients[key] = Client(
-                key=key,
-                name=str(entry.get("name") or key),
-                aliases=[str(a) for a in _as_list(entry.get("aliases"))],
-                gsc_sites=_dedupe(
-                    normalize_gsc_site(s) for s in _as_list(entry.get("gsc_sites"))
-                ),
-                ga4_property_ids=_dedupe(
-                    normalize_property_id(p) for p in _as_list(entry.get("ga4_property_ids"))
-                ),
-            )
-        except ValueError as e:
-            raise ValueError(f"Marca '{key}' en {clients_path().name}: {e}") from e
+    """Carga y valida todos los clientes. Devuelve {} si no existe el archivo."""
+    clients: dict[str, Client] = {}
+    for entry in _read_raw()[1]:
+        c = _parse(entry)
+        if c.key in clients:
+            raise ValueError(f"Cliente duplicado en {clients_path().name}: '{c.name}'.")
+        clients[c.key] = c
     return clients
 
 
 def find_client(query: str) -> Client:
-    """Busca una marca por clave, nombre o alias (sin tildes ni mayúsculas)."""
+    """Busca un cliente por nombre o alias (sin tildes ni mayúsculas)."""
     clients = load_clients()
     if not clients:
         raise ValueError(
-            f"No hay marcas registradas ({clients_path().name} no existe o está vacío). "
+            f"No hay clientes registrados ({clients_path().name} no existe o está vacío). "
             "Usa save_client() o copia clients.example.json a clients.json."
         )
     q = slugify(query)
     for c in clients.values():
-        if q in {slugify(c.key), slugify(c.name), *(slugify(a) for a in c.aliases)}:
+        if q in {c.key, *(slugify(a) for a in c.aliases)}:
             return c
     partial = [
         c for c in clients.values()
-        if q and any(q in slugify(n) for n in (c.key, c.name, *c.aliases))
+        if q and any(q in slugify(n) for n in (c.name, *c.aliases))
     ]
     if len(partial) == 1:
         return partial[0]
-    available = ", ".join(c.name for c in clients.values())
     if partial:
         raise ValueError(
-            f"'{query}' es ambiguo: {', '.join(c.name for c in partial)}."
+            f"'{query}' es ambiguo: coincide con {', '.join(c.name for c in partial)}. "
+            "Indica el nombre completo."
         )
-    raise ValueError(f"No existe la marca '{query}'. Marcas registradas: {available}.")
+    available = ", ".join(c.name for c in clients.values())
+    raise ValueError(f"No existe el cliente '{query}'. Clientes registrados: {available}.")
 
 
 def client_for_site(site_url: str) -> Client | None:
@@ -174,6 +214,11 @@ def client_for_property(property_id: str) -> Client | None:
 
 # ── Escritura ──────────────────────────────────────────────────────────────────
 
+def _ga4_field(ids: list[str]):
+    """null, 'id' o ['id', ...] según cuántas propiedades haya."""
+    return None if not ids else ids[0] if len(ids) == 1 else ids
+
+
 def save_client(
     name: str,
     gsc_sites: list[str] | None = None,
@@ -181,33 +226,40 @@ def save_client(
     aliases: list[str] | None = None,
 ) -> Client:
     """
-    Crea la marca o AÑADE activos a una existente (nunca borra los que ya hay;
-    para quitar alguno, edita clients.json a mano).
+    Crea el cliente o AÑADE activos a uno existente (nunca borra los que ya
+    hay; para quitar alguno, edita clients.json a mano). Escribe en el
+    formato {"clientes": [...]} conservando _info y las notas (_nota).
     """
     key = slugify(name)
     if not key:
-        raise ValueError("El nombre de la marca no puede estar vacío.")
+        raise ValueError("El nombre del cliente no puede estar vacío.")
 
     new_sites = [normalize_gsc_site(s) for s in _as_list(gsc_sites)]
     new_props = [normalize_property_id(p) for p in _as_list(ga4_property_ids)]
 
-    raw = _read_raw()
-    entry = raw.get(key, {})
-    merged = {
-        "name": entry.get("name") or name.strip(),
-        "aliases": _dedupe(_as_list(entry.get("aliases")) + _as_list(aliases)),
-        "gsc_sites": _dedupe(
-            [normalize_gsc_site(s) for s in _as_list(entry.get("gsc_sites"))] + new_sites
-        ),
-        "ga4_property_ids": _dedupe(
-            [normalize_property_id(p) for p in _as_list(entry.get("ga4_property_ids"))]
-            + new_props
-        ),
-    }
-    raw[key] = merged
+    meta, entries = _read_raw()
+    for e in entries:
+        _parse(e)  # valida lo existente antes de reescribir el archivo
+
+    entry = next((e for e in entries if slugify(str(_first(e, "nombre", "name"))) == key), None)
+    if entry is None:
+        entry = {"nombre": name.strip()}
+        entries.append(entry)
+    cur = _parse(entry)
+
+    entry.pop("name", None)
+    entry["nombre"] = cur.name
+    for old in ("aliases", "gsc_sites", "ga4_property_ids"):
+        entry.pop(old, None)
+    entry["alias"] = _dedupe(cur.aliases + _as_list(aliases))
+    entry["gsc"] = _dedupe(cur.gsc_sites + new_sites)
+    entry["ga4_property_id"] = _ga4_field(_dedupe(cur.ga4_property_ids + new_props))
 
     path = clients_path()
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(raw, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    tmp.write_text(
+        json.dumps({**meta, "clientes": entries}, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
     tmp.replace(path)
     return load_clients()[key]
